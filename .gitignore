@@ -1,0 +1,10 @@
+.DS_Store
+.tools/
+.cache/
+.venv/
+build/
+dist/
+node_modules/
+__pycache__/
+*.pyc
+docs/local/

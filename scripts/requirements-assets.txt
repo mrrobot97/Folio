@@ -1,0 +1,2 @@
+# UI font subsetting, separate from the ESP-IDF environment.
+fonttools==4.66.1

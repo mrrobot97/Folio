@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Folio · 为小纸 Pico 制作的阅读固件。查看开发状态、校验发布包，在明确确认后更新设备。">
+  <title>Folio · 把时间留给阅读</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<header class="shell nav"><a class="wordmark" href="#" aria-label="Folio 首页">folio<span>●</span></a><nav aria-label="主导航"><a href="#about">关于 Folio</a><a href="#screens">界面预览</a><a href="#install">安装与更新</a><a href="https://github.com/mrrobot97/Folio" target="_blank" rel="noopener">GitHub ↗</a></nav></header>
+<main>
+<section class="shell hero" id="about">
+  <div class="hero-copy"><p class="eyebrow">MADE FOR 小纸 PICO</p><h1>让书页，<br>回到手边。</h1><p class="lede">一块墨水屏，一段属于自己的时间。<br>Folio 正在为小纸 Pico 构建简洁、专注的阅读体验。</p><a class="button dark" href="#install">查看安装与更新 <span>↓</span></a><p class="status"><i></i> 开发中 · 尚未发布真机验收版本</p></div>
+  <div class="device-wrap"><div class="device" aria-label="阅读界面示意，不代表真机验证结果"><div class="paper"><div class="book-meta"><span>FOLIO</span><span>片刻之间</span></div><div class="chapter">第一章</div><h2>慢下来，<br>读一页。</h2><p>窗边的光落在纸上。没有提醒，没有跳动的数字，只有文字，带着你走向另一个地方。</p><p>把时间留给一本书。让一个念头慢慢展开，让这一页，成为今天安静的一部分。</p><div class="paper-bottom"><span>继续阅读</span><span>01 / 08</span></div></div><div class="keys"><span>◁</span><span>○</span><span>▷</span></div></div><p class="caption">界面示意 · 4.7 英寸 · 684 × 1216</p></div>
+</section>
+<section class="shell principles" aria-label="产品方向"><article><span>01 — 阅读</span><h2>清晰，也从容</h2><p>围绕字体、分页与翻页响应持续打磨。性能和残影以真机测量为准。</p></article><article><span>02 — 记录</span><h2>看见阅读的积累</h2><p>阅读时长、按书统计与月历，在设备本地保存。每次多读一点。</p></article><article><span>03 — 留白</span><h2>休息，也有自己的样子</h2><p>锁屏壁纸与分级休眠，让设备在阅读之外安静待命。</p></article></section>
+<section class="shell preview-section" id="screens" aria-labelledby="preview-title">
+<div class="preview-heading"><div><p class="eyebrow">A LOOK INSIDE</p><h2 id="preview-title">界面，先看一眼。</h2></div><span class="preview-tag">设计预览 v0.4.2</span></div>
+<p class="preview-description">以下是已冻结设计稿的代表画板，均可点击查看 684 × 1216 原图。它们不是设备照片或真机截图；画面中的图书、日期、电量与时长均为示例。</p>
+<div class="preview-grid">
+<figure><a href="./assets/previews/H01.png" target="_blank" rel="noopener" aria-label="在新标签页查看首页设计原图，684 × 1216"><img src="./assets/previews/H01.png" width="684" height="1216" loading="lazy" decoding="async" alt="首页设计预览：继续阅读卡片、今日阅读时长、快捷入口与三本示例图书"></a><figcaption><span>设计预览 v0.4.2 · H01</span><h3>从上次读到的地方继续</h3><p>当前已有续读、书架和统计入口；图中原书封面、全局书签与导入排序仍属设计目标。</p><a href="./assets/previews/H01.png" target="_blank" rel="noopener">查看原图 ↗</a></figcaption></figure>
+<figure><a href="./assets/previews/R01.png" target="_blank" rel="noopener" aria-label="在新标签页查看阅读正文设计原图，684 × 1216"><img src="./assets/previews/R01.png" width="684" height="1216" loading="lazy" decoding="async" alt="阅读正文设计预览：中文段落、章节标题、书名、页码与底部进度线"></a><figcaption><span>设计预览 v0.4.2 · R01</span><h3>把视线留给文字</h3><p>阅读基础复用官方 TXT / EPUB 与分页能力。字体呈现、翻页响应和残影还需真机验收。</p><a href="./assets/previews/R01.png" target="_blank" rel="noopener">查看原图 ↗</a></figcaption></figure>
+<figure><a href="./assets/previews/R04.png" target="_blank" rel="noopener" aria-label="在新标签页查看字体与排版设计原图，684 × 1216"><img src="./assets/previews/R04.png" width="684" height="1216" loading="lazy" decoding="async" alt="字体与排版设计预览：示例文字、字体字号行距选项、取消和应用更改按钮"></a><figcaption><span>设计预览 v0.4.2 · R04</span><h3>先调整，再决定应用</h3><p>展示排版草稿与明确应用的目标布局。本批尚未完整实现画板中的所有字体和排版选项。</p><a href="./assets/previews/R04.png" target="_blank" rel="noopener">查看原图 ↗</a></figcaption></figure>
+<figure><a href="./assets/previews/ST04.png" target="_blank" rel="noopener" aria-label="在新标签页查看阅读热力图设计原图，684 × 1216"><img src="./assets/previews/ST04.png" width="684" height="1216" loading="lazy" decoding="async" alt="阅读热力图设计预览：2026年10月示例月历，以灰阶、纹理和分钟数字呈现每日时长"></a><figcaption><span>设计预览 v0.4.2 · ST04</span><h3>看见每一天的积累</h3><p>当前已有本地月历、选日明细与按书统计。未校时会显示日期未知，图中数值不是实测记录。</p><a href="./assets/previews/ST04.png" target="_blank" rel="noopener">查看原图 ↗</a></figcaption></figure>
+<figure><a href="./assets/previews/L-WALLPAPER.png" target="_blank" rel="noopener" aria-label="在新标签页查看休眠壁纸设计原图，684 × 1216"><img src="./assets/previews/L-WALLPAPER.png" width="684" height="1216" loading="lazy" decoding="async" alt="休眠壁纸设计预览：灰阶山形与月亮，下方显示设备已休眠及短按电源键唤醒提示"></a><figcaption><span>设计预览 v0.4.2 · L-WALLPAPER</span><h3>安静待命，也有风景</h3><p>当前已有 FAST / ECO 与壁纸入口。导入、保存和唤醒能力需要独立验证，不能仅凭预览图认定完成。</p><a href="./assets/previews/L-WALLPAPER.png" target="_blank" rel="noopener">查看原图 ↗</a></figcaption></figure>
+</div>
+<details class="preview-boundary"><summary>本批实现范围与设计之间的差异</summary><p>已实现的产品页面包括首页、阅读统计、月历热力图、基础设置、休眠设置和内置存储恢复入口。完整书签、原书封面提取、可靠导入排序以及部分字体、传书和诊断子页尚未完成设计级替换。全局深色模式本版暂缓，自动休眠策略尚未完整接线。这里只展示设计方向，不代表 354 张画板均已实现或通过真机验收。</p></details>
+</section>
+<section class="install-wrap" id="install"><div class="shell install-grid"><div class="install-intro"><p class="eyebrow">INSTALL & UPDATE</p><h2>准备好，再更新。</h2><p>从项目发布页取得完整发布包，在这里校验文件。所有连接和写入都由你明确发起。</p><a href="https://github.com/mrrobot97/Folio/releases" target="_blank" rel="noopener" class="text-link">前往 GitHub Releases ↗</a><div class="note"><strong>当前没有随站点提供固件</strong><p>构建测试通过不代表真机验收完成。网页暂不提供首次分区迁移，也不会自动擦除整片 Flash。</p></div><details><summary>浏览器与恢复说明</summary><p>请使用支持 Web Serial 的桌面 Chrome 或 Edge，通过 HTTPS 或本机 localhost 打开。Safari、Firefox 和手机通常无法使用此流程。</p><p>连接可能让设备进入下载模式。刷写期间保持 USB 数据线连接；中断后不要反复断电，可重新连接串口并按项目恢复说明操作。</p><p>这里只覆盖已有兼容引导与 factory 分区的应用。新设备安装、分区变化和 OTA 双槽设备需要单独核验。不会写入 NVS、书库、分区表或安全熔丝。</p></details></div>
+<div class="installer"><div class="installer-head"><strong>设备更新</strong><span id="ready-state">等待发布包</span></div>
+<div class="step"><span class="step-number">1</span><div><h3>选择发布文件</h3><p>同时选择 manifest.json、app.bin、bootloader.bin 和 partition-table.bin。</p><label class="file-label">选择文件<input id="files" type="file" multiple accept=".json,.bin,.txt"></label><p id="package-state" role="status">尚未选择文件，不可刷写。</p><div id="package-detail" hidden></div></div></div>
+<div class="step"><span class="step-number">2</span><div><h3>确认设备与连接</h3><p id="browser-state">正在检测浏览器支持…</p><p id="driver-state">正在检测刷写驱动…</p><label class="check"><input id="board-confirm" type="checkbox">我已核对设备为小纸 Pico RDP-G01-W，并已备份重要阅读数据。</label><label class="check"><input id="power-confirm" type="checkbox">设备电量至少 30%，已连接稳定 USB 电源；允许连接时进入下载模式。</label><button id="connect" disabled>连接并核验设备</button><button id="disconnect" class="subtle" disabled>断开连接</button></div></div>
+<div class="step"><span class="step-number">3</span><div><h3>写入应用</h3><p id="device-state">等待文件与设备检查。</p><label class="check"><input id="write-confirm" type="checkbox" disabled>我理解这会覆盖当前应用；写入期间不会拔线或关闭页面。</label><button id="flash" class="dark" disabled>确认写入应用</button><button id="reboot" class="subtle" disabled>重启设备</button><progress id="progress" max="100" value="0" aria-label="写入进度"></progress></div></div>
+<div id="message" class="message" role="status" aria-live="polite">文件校验只验证完整性；请从可信项目发布页取得发布包。</div><details class="logs"><summary>操作记录</summary><pre id="log" aria-live="polite"></pre></details></div></div></section>
+</main><footer class="shell"><span>folio · 留一点时间给阅读</span><span>基于 MindReset 官方演示固件 · 开源许可随发布包提供</span></footer>
+<script type="module" src="./src/app.js"></script>
+</body></html>

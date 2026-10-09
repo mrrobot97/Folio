@@ -1,0 +1,12 @@
+{
+  "name": "folio-local-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "preview": "node preview.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "optionalDependencies": { "esptool-js": "0.7.0" }
+}

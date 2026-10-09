@@ -1,0 +1,3 @@
+#pragma once
+#define READ_PICO_EPD_PCLK_MIN_MHZ 8
+#define READ_PICO_EPD_PCLK_MAX_MHZ 24

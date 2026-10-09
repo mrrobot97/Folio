@@ -1,0 +1,37 @@
+{
+  "kind": "design-preview",
+  "version": "0.4.2",
+  "dimensions": [
+    684,
+    1216
+  ],
+  "source": "read_pico_firmware/docs/local/ui-redesign/v0.4.2/output/png",
+  "notice": "Static approved design previews. Example books, dates, battery and statistics are not device data.",
+  "files": [
+    {
+      "screen": "H01",
+      "file": "H01.png",
+      "sha256": "e9a4cc76a78766a88ff08f6a8eea81437ce4f020441030ac15e2983f7999df38"
+    },
+    {
+      "screen": "R01",
+      "file": "R01.png",
+      "sha256": "0313ba1a8548b0dc357478a1fdfba4c081be2e46abf15d9bfdb593f3ddb7ade3"
+    },
+    {
+      "screen": "R04",
+      "file": "R04.png",
+      "sha256": "e11452453a6df4b61957bd1a7c91e922aae6d72d7c5c140389465535671adb28"
+    },
+    {
+      "screen": "ST04",
+      "file": "ST04.png",
+      "sha256": "715a7cadf213257ff7e9cdd8c1edd18a443fef2c01f4f13b1af93e2186c4bea2"
+    },
+    {
+      "screen": "L-WALLPAPER",
+      "file": "L-WALLPAPER.png",
+      "sha256": "32e20709d903920c32583386a19ae4f04c32abed15453204d538f6ef58a1f01e"
+    }
+  ]
+}
