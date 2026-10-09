@@ -9,10 +9,10 @@
 | `firmware/components/read_pico*`、芯片驱动 | 复用官方 BSP、PMU、I²C、TF、输入、传书及离线检索 | 保留已验证板型与协议；见各目录 Apache-2.0 或数据集许可 |
 | `firmware/components/epdiy` | 复用官方裁剪版，不调整扫描时序 | LGPL-3.0-or-later；保留原说明与源文件声明 |
 | `firmware/components/e0470_epaper_waveform` | 原样复用面板波形 | 保留官方面板参数，不把黑闪优化等同于更改波形 |
-| `firmware/main/font`、`main/book` | 复用字形缓存、TXT/EPUB、编码、分页、图片及逐书进度；修改存储安全策略 | Apache-2.0；stb/TJpgDec 等见文件内许可 |
+| `firmware/main/font`、`main/book` | 复用官方字形光栅化、TXT/EPUB、编码与图片解析；改写为三字体角色、有界候选分页、中文禁则及带字号来源的进度 | Apache-2.0；stb/TJpgDec 原文件保留，未重写底层光栅器/解码器 |
 | `firmware/main/settings.*`、`sleep.*`、`app/*` | 在官方生命周期上接入 Folio 数据保护、产品路由和睡眠恢复 | 沿用 Apache-2.0，保留原作者标记 |
-| `firmware/main/apps/app_book.c` | 基于官方阅读器增加统计和独立排版草稿状态 | 不重写已经存在的解析器或字体引擎 |
-| `firmware/main/apps/app_transfer.c` | 复用官方传书页面，修正字体不包含的范围符号 | UI 显示修正；传输协议本批未重写 |
+| `firmware/main/apps/app_book.c` | 基于官方阅读器增加统计、完整排版事务适配、资源恢复和候选页表发布 | 保留原解析器，区分预览、应用和迁移 |
+| `firmware/main/apps/app_transfer.c`、`components/read_pico_transfer` | 复用官方HTTP/上传校验，增加字体子流程、停止回执和仅字体能力限制 | 子流程禁止图书读写/删除/进度清理；停止和唤醒不自动重启网络 |
 | `firmware/tools` | 复用官方回归，增加 macOS 链接器兼容和 Folio 字体扫描目录 | 保留解析器内存跟踪和 sanitizer，不因宿主平台差异跳过断言 |
 | `firmware/main/folio/`、`apps/app_folio_*` | Folio 新建的统计、检查点、产品 UI、时间、壁纸和更新策略 | 新代码 Apache-2.0；不是官方提供的产品功能 |
 | `web/`、`scripts/`、`tests/` | Folio 新建本地网站、发布工具与针对新增行为的回归 | 依赖继续适用其自身许可 |
@@ -32,3 +32,5 @@
 ## 构建版本
 
 ESP-IDF 固定官方 v6.1，提交 `fff9895c82d744c7237be8847347bdd1b07c6643`。依据为官方演示的 AGENTS、锁文件、CI 配置和 HPM 私有头依赖；不是按“最新版”自动升级。`sdkconfig.defaults` 的 120MHz Flash/PSRAM 与 Zbit HPM 保持原值，`sdkconfig.ci` 仅作编译回归，不能冒充真机发布配置。
+
+本节点不接入已经独立试验的图片压缩草案；未提交草案与后续工作位置见 `NEXT_STEPS.md`。来源计数以提交内容为准，工作区审计可能同时列出这些待续文件。

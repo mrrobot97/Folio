@@ -103,17 +103,19 @@ static bool decode(const unsigned char data[DRAFT_BYTES], folio_reader_draft_t* 
     d->dirty = d->applied_px != d->draft_px;
     return editing <= 1 && visible <= 1 && valid(d);
 }
-bool folio_reader_draft_load(const char* directory, const char* path, folio_reader_draft_t* out) {
+folio_checkpoint_result_t folio_reader_draft_load_result(const char* directory, const char* path, folio_reader_draft_t* out) {
     char stem[32];
-    if (!out || !draft_stem(path, stem)) return false;
+    if (!out || !draft_stem(path, stem)) return FOLIO_CHECKPOINT_IO;
     unsigned char data[DRAFT_BYTES]; size_t len = 0; uint64_t generation = 0;
-    if (folio_checkpoint_load(directory, stem, DRAFT_SCHEMA, data, sizeof(data), &len, &generation) != FOLIO_CHECKPOINT_OK || len != sizeof(data)) return false;
+    folio_checkpoint_result_t result=folio_checkpoint_load(directory, stem, DRAFT_SCHEMA, data, sizeof(data), &len, &generation);
+    if(result!=FOLIO_CHECKPOINT_OK)return result;
     folio_reader_draft_t value;
-    if (!decode(data, &value) || strcmp(value.path, path)) return false;
+    if (len!=sizeof(data)||!decode(data, &value) || strcmp(value.path, path)) return FOLIO_CHECKPOINT_CORRUPT;
     value.confirmed_generation = generation;
     *out = value;
-    return true;
+    return FOLIO_CHECKPOINT_OK;
 }
+bool folio_reader_draft_load(const char* directory,const char* path,folio_reader_draft_t* out){return folio_reader_draft_load_result(directory,path,out)==FOLIO_CHECKPOINT_OK;}
 bool folio_reader_draft_save(const char* directory, const folio_reader_draft_t* draft) {
     char stem[32];
     if (!valid(draft) || !draft_stem(draft->path, stem)) return false;

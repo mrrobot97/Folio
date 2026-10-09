@@ -73,7 +73,7 @@ int main(void){
     p.last_open_s=0;assert(book_progress_save(sd,&p)==ESP_OK);
     assert(book_progress_load(sd,p.file_size,&q)&&q.last_open_s==2);
     latest->data[3]=1;assert(book_progress_load(sd,p.file_size,&q)&&q.last_open_s==0&&q.byte_off==p.byte_off);
-    latest->data[3]=3;assert(!book_progress_load(sd,p.file_size,&q));assert(book_progress_save(sd,&p)==ESP_ERR_INVALID_STATE);
+    latest->data[3]=4;assert(!book_progress_load(sd,p.file_size,&q));assert(book_progress_save(sd,&p)==ESP_ERR_INVALID_STATE);
     latest->data[3]=2;assert(book_progress_set_last_path(sd)==ESP_OK);latest->data[24]='!';
     assert(book_progress_forget(sd)==ESP_ERR_INVALID_STATE&&!strcmp(last,sd));assert(book_progress_clear(sd)==ESP_ERR_INVALID_STATE);latest->data[24]='/';
     seq_failure=ESP_ERR_NVS_NOT_ENOUGH_SPACE;assert(book_progress_save(sd,&p)==seq_failure&&sequence==2);
@@ -103,5 +103,17 @@ int main(void){
     p.px=37;assert(book_progress_save(sd,&p)==ESP_ERR_INVALID_ARG);p.px=48;p.pct=101;assert(book_progress_save(sd,&p)==ESP_ERR_INVALID_ARG);
     p.pct=83;sequence=UINT32_MAX;int before=commits;
     assert(book_progress_save(sd,&p)==ESP_ERR_INVALID_STATE&&commits==before&&sequence==UINT32_MAX);
-    puts("book progress: v1/v2, sequence, collision, two roots, NVS-full, partial forget and retry passed");
+    sequence=100;p.format=BOOK_PROGRESS_TRANSIENT_DEFAULTS;
+    assert(book_progress_save(sd,&p)==ESP_OK);
+    assert(latest->data[3]==3&&latest->len==24+strlen(sd)+1);
+    assert(book_progress_load(sd,p.file_size,&q)&&q.format==BOOK_PROGRESS_TRANSIENT_DEFAULTS&&q.px==48&&q.last_open_s==101);
+    book_progress_t unchanged=q;latest->data[20]=4;
+    assert(!book_progress_load(sd,p.file_size,&q)&&!memcmp(&q,&unchanged,sizeof(q)));
+    assert(book_progress_save(sd,&p)==ESP_ERR_INVALID_STATE);latest->data[20]=BOOK_PROGRESS_TRANSIENT_DEFAULTS;
+    latest->data[3]=2;assert(book_progress_load(sd,p.file_size,&q)&&q.format==BOOK_PROGRESS_NATIVE);
+    latest->data[3]=1;assert(book_progress_load(sd,p.file_size,&q)&&q.format==BOOK_PROGRESS_NATIVE&&!q.last_open_s);
+    latest->data[3]=3;p.format=BOOK_PROGRESS_FOLIO_EM;assert(book_progress_save(sd,&p)==ESP_OK);assert(book_progress_load(sd,p.file_size,&q)&&q.format==BOOK_PROGRESS_FOLIO_EM);
+    p.format=BOOK_PROGRESS_FOLIO_NATIVE;assert(book_progress_save(sd,&p)==ESP_OK);assert(book_progress_load(sd,p.file_size,&q)&&q.format==BOOK_PROGRESS_FOLIO_NATIVE);
+    p.format=4;assert(book_progress_save(sd,&p)==ESP_ERR_INVALID_ARG);
+    puts("book progress: v1/v2/v3, fixed-size format marker, sequence, collision, NVS-full, partial forget and retry passed");
 }

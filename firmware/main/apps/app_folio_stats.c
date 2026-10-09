@@ -7,6 +7,7 @@
  * Frozen: Pure render, separate undated time, selection paints two cells and detail with driver cleanup retained.
  */
 #include "app.h"
+#include "folio_metrics.h"
 #include "folio_ui.h"
 #include "folio_navigation.h"
 #include "reading_service.h"
@@ -356,5 +357,6 @@ static app_redraw_t on_key(app_ctx_t *ctx,int key){
     if(key==UI_KEY_3)ctx->request_menu=true;
     return APP_REDRAW_NONE;
 }
-const app_desc_t app_folio_stats={.title="本地阅读统计",.detail="每日、单本与月历",.owns_keys=true,.owns_footer=true,
+static int folio_page_metric_scene(void) { return FOLIO_METRICS_STATS; }
+const app_desc_t app_folio_stats={ .metrics_scenario=folio_page_metric_scene,.title="本地阅读统计",.detail="每日、单本与月历",.owns_keys=true,.owns_footer=true,
     .on_enter=on_enter,.render=render,.on_gesture=on_gesture,.on_key=on_key,.present=present,.on_tick=on_tick};

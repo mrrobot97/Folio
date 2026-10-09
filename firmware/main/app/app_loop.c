@@ -39,6 +39,7 @@
 #include "settings.h"
 #include "sleep.h"
 #include "folio_power.h"
+#include "folio_metrics.h"
 #include "ttf_font.h"
 #include "ui_kit.h"
 #include "ui_menu.h"
@@ -60,7 +61,24 @@ void app_lock_ignore_for(int64_t ms) {
     s_lock_ignore_until_ms = esp_timer_get_time() / 1000 + ms;
 }
 
+#if defined(CONFIG_FOLIO_METRICS) && CONFIG_FOLIO_METRICS
+static folio_metrics_scenario_t metrics_scene(const app_desc_t* app) {
+    int scene = app && app->metrics_scenario ? app->metrics_scenario() : FOLIO_METRICS_OTHER;
+    return scene >= FOLIO_METRICS_SYSTEM && scene <= FOLIO_METRICS_OTHER ? (folio_metrics_scenario_t)scene : FOLIO_METRICS_OTHER;
+}
+#else
+#define metrics_scene(app) FOLIO_METRICS_OTHER
+#endif
+
+static void render_timed(app_ctx_t* ctx, const app_desc_t* app) {
+    if (!app->render) return;
+    folio_metrics_span_t span = folio_metrics_begin();
+    app->render(ctx,ctx->fb);
+    folio_metrics_render_end(span);
+}
+
 void app_present(app_ctx_t* ctx, const app_desc_t* app, app_redraw_t redraw) {
+    folio_metrics_set_scenario(metrics_scene(app));
     enum EpdDrawError result = EPD_DRAW_SUCCESS;
     if (app->present != NULL && app->present(ctx, redraw)) return;
     switch (redraw) {
@@ -79,14 +97,14 @@ void app_present(app_ctx_t* ctx, const app_desc_t* app, app_redraw_t redraw) {
             break;
         }
         case APP_REDRAW_FULL:
-            if (app->render != NULL) app->render(ctx, ctx->fb);
+            render_timed(ctx, app);
             result = APP_PAGE_FORCE_FULL
                 ? update_display_full(ctx->hl)
                 : update_display_mode(ctx->hl, APP_PAGE_REFRESH_MODE);
             break;
         case APP_REDRAW_PAGE:
         default:
-            if (app->render != NULL) app->render(ctx, ctx->fb);
+            render_timed(ctx, app);
             result = update_display_mode(ctx->hl, APP_PAGE_REFRESH_MODE);
             break;
     }
@@ -103,12 +121,14 @@ static void cancel_gesture(app_ctx_t* ctx, const app_desc_t* app, ui_gesture_t* 
         bool return_requested = ctx->request_return;
         bool sleep_requested = ctx->request_sleep;
         bool poweroff_requested = ctx->request_poweroff;
+        bool menu_after_switch = ctx->request_menu_after_switch;
         app_redraw_t redraw = app->on_gesture(ctx, &event);
         ctx->request_app = requested;
         ctx->request_menu = menu_requested;
         ctx->request_return = return_requested;
         ctx->request_sleep = sleep_requested;
         ctx->request_poweroff = poweroff_requested;
+        ctx->request_menu_after_switch = menu_after_switch;
         ui_gesture_reset(gesture);
         app_present(ctx, app, redraw);
     }
@@ -173,7 +193,9 @@ static void present_menu(app_ctx_t* ctx, const app_desc_t* current, int leaf, me
     if (display_take_white_exit()) {
         guard_draw_result(ctx->hl, update_display_white(ctx->hl));
     }
+    folio_metrics_span_t span = folio_metrics_begin();
     ui_draw_menu_page(ctx->fb, current, leaf);
+    folio_metrics_render_end(span);
     guard_draw_result(ctx->hl, update_display_mode(ctx->hl, APP_PAGE_REFRESH_MODE));
 }
 
@@ -231,7 +253,7 @@ static bool poll_media(app_ctx_t* ctx, const app_desc_t* current,
     if (!lost) return false;
     *invalidated = true;
     if (current->on_media_lost) current->on_media_lost(ctx);
-    if (ttf_font_ready() && !ttf_font_is_builtin()) ttf_font_open_builtin();
+    ttf_font_media_lost();
     return true;
 }
 
@@ -300,6 +322,7 @@ void app_loop_run(const app_loop_config_t* config) {
         ctx.request_return = false;
         ctx.request_sleep = false;
         ctx.request_poweroff = false;
+        ctx.request_menu_after_switch = false;
         bool selected_from_menu = false;
 
         if (ctx.now_ms - last_media_poll_ms >= MEDIA_POLL_INTERVAL_MS) {
@@ -320,6 +343,9 @@ void app_loop_run(const app_loop_config_t* config) {
             }
         }
 
+        if ((pressed || released) && err == ESP_OK)
+            folio_metrics_input(metrics_scene(current),
+                ui_key_hit_test(latest.x,latest.y) >= 0 ? FOLIO_METRICS_KEY : FOLIO_METRICS_TOUCH);
         if (err != ESP_OK) {
             held_key = -1;
             cancel_gesture(&ctx, current, &gesture);
@@ -351,7 +377,7 @@ void app_loop_run(const app_loop_config_t* config) {
                     guard_draw_result(ctx.hl, update_display_full(ctx.hl));
                 } else if (current->present != NULL && current->present(&ctx, APP_REDRAW_FULL)) {
                 } else if (current->render != NULL) {
-                    current->render(&ctx, ctx.fb);
+                    render_timed(&ctx, current);
                     guard_draw_result(ctx.hl, update_display_full(ctx.hl));
                 }
             } else if (key == UI_KEY_3 || handle_hit) {
@@ -423,8 +449,11 @@ void app_loop_run(const app_loop_config_t* config) {
         if (read_pico_pmu_ready() && !current->holds_pmu
             && ctx.now_ms - last_lock_poll_ms >= APP_LOCK_POLL_MS) {
             last_lock_poll_ms = ctx.now_ms;
-            if (read_pico_pmu_take_key_short() && ctx.now_ms >= s_lock_ignore_until_ms)
+            if (read_pico_pmu_take_key_short() && ctx.now_ms >= s_lock_ignore_until_ms) {
+                folio_metrics_input_end();
+                folio_metrics_input(metrics_scene(current),FOLIO_METRICS_POWER);
                 ctx.request_sleep = true;
+            }
         }
         if (ctx.request_sleep || ctx.request_poweroff) {
             held_key = -1;
@@ -437,7 +466,7 @@ void app_loop_run(const app_loop_config_t* config) {
         // The saved font lives on the card; retry until the mount is ready.
         if (ctx.now_ms - last_font_retry_ms >= FONT_RETRY_INTERVAL_MS) {
             last_font_retry_ms = ctx.now_ms;
-            if (try_load_saved_sd_font(!media_invalidated)) {
+            if (!current->manages_font && try_load_saved_sd_font(!media_invalidated)) {
                 held_key = -1;
                 cancel_gesture(&ctx, current, &gesture);
                 ctx.consumed = true;
@@ -457,6 +486,8 @@ void app_loop_run(const app_loop_config_t* config) {
                 ctx.now_ms < held_since_ms) {
                 held_key = -1;
             } else if (!pressed && ctx.now_ms - held_since_ms >= UI_LONG_PRESS_MS) {
+                folio_metrics_input_end();
+                folio_metrics_input(metrics_scene(current),FOLIO_METRICS_KEY);
                 int key = held_key;
                 held_key = -1;
                 ctx.consumed = true;
@@ -483,11 +514,13 @@ void app_loop_run(const app_loop_config_t* config) {
             held_key = -1;
             const app_desc_t* next = ctx.request_app;
             const bool go_back = ctx.request_return;
+            const bool menu_after_switch = ctx.request_menu_after_switch;
             cancel_gesture(&ctx, current, &gesture);
             menu_pressed = UI_MENU_HIT_NONE;
             ctx.request_app = NULL;
             ctx.request_menu = false;
             ctx.request_return = false;
+            ctx.request_menu_after_switch = false;
             ctx.consumed = true;
             if (go_back) {
                 menu_open = return_app ? return_to_menu : true;
@@ -511,7 +544,17 @@ void app_loop_run(const app_loop_config_t* config) {
                     return_menu_leaf = menu_leaf;
                 }
                 menu_open = false;
-                switch_to(&ctx, &current, next);
+                if (menu_after_switch) {
+                    if (next != current) {
+                        if (current->on_exit) current->on_exit(&ctx);
+                        current = next;
+                        if (current->on_enter) current->on_enter(&ctx);
+                    }
+                    return_app = NULL;
+                    menu_open = true;
+                    menu_leaf = ui_menu_leaf_for_app(current);
+                    present_menu(&ctx,current,menu_leaf,&feedback);
+                } else switch_to(&ctx, &current, next);
 
             } else {
                 menu_open = true;
@@ -524,7 +567,8 @@ void app_loop_run(const app_loop_config_t* config) {
             cancel_gesture(&ctx,current,&gesture);
             menu_pressed = UI_MENU_HIT_NONE;
             if (current->on_visibility) current->on_visibility(&ctx,false);
-            folio_power_request(&ctx,ctx.request_poweroff,&s_lock_ignore_until_ms);
+            bool woke = folio_power_request(&ctx,current,ctx.request_poweroff,&s_lock_ignore_until_ms);
+            if (woke && current->on_wake) current->on_wake(&ctx);
             // 保存失败的专用“返回编辑”可指定页面；普通电源取消不改来源。
             // A failed-save return-to-editor can request a page; ordinary power cancel preserves the origin.
             if (ctx.request_app) {
@@ -547,6 +591,7 @@ void app_loop_run(const app_loop_config_t* config) {
                 if (current->on_visibility) current->on_visibility(&ctx,true);
             }
         }
+        folio_metrics_input_end();
         vTaskDelay(pdMS_TO_TICKS(LOOP_TICK_MS));
     }
 }

@@ -22,7 +22,7 @@ struct app_desc;
 typedef struct { uint8_t* fb; void* hl; bool consumed; int64_t now_ms; const struct app_desc* request_app; bool request_return; } app_ctx_t;
 typedef enum { UI_GESTURE_PRESS, UI_GESTURE_TAP, UI_GESTURE_CANCEL, UI_GESTURE_LONG_PRESS } ui_gesture_type_t;
 typedef struct { ui_gesture_type_t type; uint16_t x,y,x0,y0; } ui_gesture_event_t;
-typedef struct app_desc { const char *title,*detail; bool enter_full; void(*on_enter)(app_ctx_t*); void(*on_exit)(app_ctx_t*); void(*on_media_lost)(app_ctx_t*); void(*render)(app_ctx_t*,uint8_t*); bool(*present)(app_ctx_t*,app_redraw_t); app_redraw_t(*on_tick)(app_ctx_t*); app_redraw_t(*on_gesture)(app_ctx_t*,const ui_gesture_event_t*); } app_desc_t;
+typedef struct app_desc { const char *title,*detail; bool enter_full; void(*on_enter)(app_ctx_t*); void(*on_exit)(app_ctx_t*); void(*on_media_lost)(app_ctx_t*); void(*on_wake)(app_ctx_t*); int(*metrics_scenario)(void); void(*render)(app_ctx_t*,uint8_t*); bool(*present)(app_ctx_t*,app_redraw_t); app_redraw_t(*on_tick)(app_ctx_t*); app_redraw_t(*on_gesture)(app_ctx_t*,const ui_gesture_event_t*); } app_desc_t;
 enum EpdDrawMode { MODE_DU,MODE_GL16,MODE_GC16 };
 #define UI_MARGIN 40
 #define UI_CONTENT_TOP 176
@@ -82,7 +82,7 @@ static inline int app_count(void) {return 0;}
 static inline const app_desc_t* app_at(int i) {(void)i;return NULL;}
 typedef enum {READ_PICO_TRANSFER_MODE_AP,READ_PICO_TRANSFER_MODE_STA} read_pico_transfer_mode_t;
 typedef enum {READ_PICO_TRANSFER_STOPPED,READ_PICO_TRANSFER_STARTING,READ_PICO_TRANSFER_READY,READ_PICO_TRANSFER_UPLOADING,READ_PICO_TRANSFER_ERROR} read_pico_transfer_state_t;
-typedef struct {read_pico_transfer_mode_t mode;const char* root_dir;const char* font_dir;bool is_flash;size_t file_limit;uint64_t(*free_bytes_cb)(void*);void* free_bytes_ctx;int(*file_changed_cb)(const char*);} read_pico_transfer_cfg_t;
+typedef struct {read_pico_transfer_mode_t mode;const char* root_dir;const char* font_dir;bool is_flash;bool fonts_only;size_t file_limit;uint64_t(*free_bytes_cb)(void*);void* free_bytes_ctx;int(*file_changed_cb)(const char*);} read_pico_transfer_cfg_t;
 typedef struct {read_pico_transfer_mode_t mode;read_pico_transfer_state_t state;bool wifi_configured,network_ready;char ssid[33],wifi_ssid[33],url[64],cur_name[121];unsigned sta_count,done_count,changed_count;size_t cur_bytes,cur_total;int last_error;} read_pico_transfer_status_t;
 #define READ_PICO_TRANSFER_PASSWORD "readpico"
 static read_pico_transfer_status_t test_status;

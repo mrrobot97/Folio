@@ -47,6 +47,7 @@ bool ttf_font_is_builtin(void);
 const char* ttf_font_path(void);
 int ttf_font_open(const char*);
 int ttf_font_open_builtin(void);
+void ttf_font_media_lost(void);
 typedef struct { bool mounted; } read_pico_sd_info_t;
 int read_pico_sd_get_info(read_pico_sd_info_t*);
 void read_pico_sd_start_probe(void);

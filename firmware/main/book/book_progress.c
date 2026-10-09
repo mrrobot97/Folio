@@ -6,9 +6,9 @@
  * Versioned little-endian progress records with full-path collision checks.
  *
  * 冻结：独立 rp_books 命名空间；不擦除分区、不覆盖碰撞书籍。为可靠最近阅读排序，
- * v2 改用持久序号，v1 仍可恢复但排序为 0；遗忘只清指定路径，部分失败允许重试。
+ * v2 改用持久序号，v3在原保留字节记录字号来源而不增大记录；v1仍可恢复但排序为0。
  * Frozen: use rp_books; never erase partitions or overwrite collisions. Reliable recent ordering uses
- * persistent v2 sequences; v1 resumes with order zero. Forget only the given path, retrying partial failures.
+ * persistent v2 sequences; v3 tags size origin without growing records; v1 resumes with order zero.
  */
 #include "book_progress.h"
 #include "book_store.h"
@@ -79,9 +79,10 @@ static void put32(uint8_t* p, uint32_t value) {
 
 static bool record_valid(const uint8_t* data, size_t len) {
     if (len < HEADER_SIZE + 2 || len > RECORD_CAP || memcmp(data, "RPB", 3) != 0 ||
-        (data[3] != 1 && data[3] != 2)) return false;
+        (data[3] != 1 && data[3] != 2 && data[3] != 3)) return false;
     size_t path_len = len - HEADER_SIZE;
     if (data[3] == 1 && (path_len > 160 || data[23] != 0)) return false;
+    if(data[3]==3&&(data[20]>BOOK_PROGRESS_FOLIO_NATIVE||data[21]))return false;
     return ((size_t)data[22] | ((size_t)data[23] << 8)) == path_len &&
         strnlen((const char*)data + HEADER_SIZE, path_len) == path_len - 1;
 }
@@ -107,7 +108,8 @@ bool book_progress_load(const char* path, uint32_t size, book_progress_t* out) {
     *out = (book_progress_t){
         .file_size = get32(data + 4), .chapter = (uint16_t)(data[8] | (data[9] << 8)),
         .byte_off = get32(data + 10), .px = data[14], .pct = data[15],
-        .last_open_s = data[3] == 2 ? get32(data + 16) : 0,
+        .format = data[3] == 3 ? data[20] : BOOK_PROGRESS_NATIVE,
+        .last_open_s = data[3] >= 2 ? get32(data + 16) : 0,
     };
     return true;
 }
@@ -126,14 +128,15 @@ static esp_err_t check_owner(nvs_handle_t h, const char* key, const char* path) 
 
 esp_err_t book_progress_save(const char* path, const book_progress_t* progress) {
     if (!path_valid(path) || progress == NULL || progress->px < 36 || progress->px > 72 ||
-        (progress->px - 36) % 4 != 0 || progress->pct > 100) return ESP_ERR_INVALID_ARG;
-    uint8_t data[RECORD_CAP] = {'R', 'P', 'B', 2};
+        (progress->px - 36) % 4 != 0 || progress->pct > 100 || progress->format>BOOK_PROGRESS_FOLIO_NATIVE) return ESP_ERR_INVALID_ARG;
+    uint8_t data[RECORD_CAP] = {'R', 'P', 'B', 3};
     put32(data + 4, progress->file_size);
     data[8] = (uint8_t)progress->chapter;
     data[9] = (uint8_t)(progress->chapter >> 8);
     put32(data + 10, progress->byte_off);
     data[14] = progress->px;
     data[15] = progress->pct;
+    data[20] = progress->format;
     size_t path_len = strlen(path) + 1;
     data[22] = (uint8_t)path_len;
     data[23] = (uint8_t)(path_len >> 8);

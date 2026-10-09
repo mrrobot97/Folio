@@ -25,6 +25,7 @@
 #include "settings.h"
 #include "ui_kit.h"
 #include "reader_runtime.h"
+#include "format_service.h"
 #include "read_pico_transfer.h"
 #include "wallpaper.h"
 #include <stdlib.h>
@@ -234,6 +235,7 @@ static bool host_sleep_after_checkpoint(app_sleep_mode_t mode) {
 }
 
 bool app_enter_host_sleep(app_sleep_mode_t mode) {
+    folio_format_capture_power_origin(NULL);
     if (!read_pico_transfer_try_stop_if_idle() || !folio_reader_prepare_sleep(true)) {
         ESP_LOGW(TAG, "powerdown aborted: transfer or checkpoint incomplete");
         folio_reader_wake();
@@ -245,6 +247,7 @@ bool app_enter_host_sleep(app_sleep_mode_t mode) {
 void enter_lock_and_sleep(
     EpdiyHighlevelState* hl, int64_t* ignore_until_ms, sc7a20h_handle_t acc
 ) {
+    folio_format_capture_power_origin(NULL);
     app_sleep_mode_t mode = app_settings_sleep_mode();
     if (!read_pico_transfer_try_stop_if_idle()) return;
     bool saved = folio_reader_prepare_sleep(mode != APP_SLEEP_LIGHT);

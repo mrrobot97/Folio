@@ -6,9 +6,9 @@
  * Per-path NVS reading progress, independent of UI and SD.
  *
  * 冻结：文件大小不同不恢复；失败返回调用方并告警，不擦除其他记录。
- * 为无 RTC 的最近阅读排序，v2 使用持久序号；v1 保留续读但排序置零。
+ * 为无 RTC 的最近阅读排序，v2 使用持久序号；v3在保留字节标记字号来源；v1保留续读但排序置零。
  * Frozen: do not restore changed file sizes; report and warn on failures, never erase other records.
- * Recent ordering without an RTC uses persistent v2 sequences; v1 retains resume data with order zero.
+ * Recent ordering uses persistent v2 sequences; v3 tags size origin in reserved bytes; v1 resumes with order zero.
  */
 #pragma once
 
@@ -21,6 +21,12 @@
 /// Callers serialize progress writes and forget operations; HTTP stops and joins before returning to reading.
 
 typedef struct book_progress_watch book_progress_watch_t;
+typedef enum {
+    BOOK_PROGRESS_NATIVE = 0,
+    BOOK_PROGRESS_FOLIO_EM = 1,
+    BOOK_PROGRESS_TRANSIENT_DEFAULTS = 2,
+    BOOK_PROGRESS_FOLIO_NATIVE = 3,
+} book_progress_format_t;
 /// 为待保存进度创建路径监视；内存不足返回 NULL。注册/注销仅在 HTTP 停止并 join 后调用。
 /// Watch pending progress for one path; return NULL on allocation failure. Register/unregister only while HTTP is stopped and joined.
 book_progress_watch_t* book_progress_watch_create(const char* path);
@@ -40,14 +46,17 @@ typedef struct {
     uint8_t px;
     /// 全书百分比。/ Whole-book percentage.
     uint8_t pct;
+    /// v1/v2 为旧原生像素；v3区分 M2 em 与未确认初始默认，避免跨重启误迁移。
+    /// v1/v2 are legacy native pixels; v3 distinguishes M2 em and unconfirmed defaults across restart.
+    uint8_t format;
     /// 持久阅读顺序；保留旧字段名，v1 记录读取为 0。/ Persistent reading order; legacy field name, v1 records load as zero.
     uint32_t last_open_s;
 } book_progress_t;
 
 /// 校验版本、完整路径与文件大小后恢复；失败不改 out。/ Restore after version, full-path and size validation; leave out unchanged on failure.
 bool book_progress_load(const char* path, uint32_t size, book_progress_t* out);
-/// 保存 v2 进度，忽略输入 last_open_s 并预留持久单调序号；路径最长 287 字节，碰撞拒绝覆盖。
-/// Save v2 progress, replacing input last_open_s with a reserved persistent sequence; paths up to 287 bytes, reject collision overwrites.
+/// 保存等长 v3 进度，忽略输入 last_open_s 并预留持久单调序号；路径最长 287 字节，碰撞拒绝覆盖。
+/// Save same-length v3 progress, replacing last_open_s with a persistent sequence; paths up to 287 bytes, reject collision overwrites.
 esp_err_t book_progress_save(const char* path, const book_progress_t* progress);
 /// 清除此路径的进度，不删除碰撞记录。/ Clear this path without deleting colliding records.
 esp_err_t book_progress_clear(const char* path);

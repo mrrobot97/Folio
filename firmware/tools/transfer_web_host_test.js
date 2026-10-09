@@ -8,7 +8,7 @@ const assert = require('node:assert/strict');
 const source = fs.readFileSync('components/read_pico_transfer/upload.html', 'utf8').match(/<script>([\s\S]*?)<\/script>/)[1];
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
-async function setup({existing = false, confirmations = [], responses = [], deleteResponse = {ok: true}, fontsEnabled = true, bookLimit = 0} = {}) {
+async function setup({existing = false, confirmations = [], responses = [], deleteResponse = {ok: true}, fontsEnabled = true, bookLimit = 0, fontsOnly = false} = {}) {
   const all = [];
   class Element {
     constructor() { this.children = []; this.dataset = {}; this.value = ''; all.push(this); }
@@ -23,7 +23,7 @@ async function setup({existing = false, confirmations = [], responses = [], dele
     createElement() { return new Element(); }, querySelectorAll() { return all.filter(e => e.dataset.mutate); }};
   const state = {sent: [], requested: [], deleted: 0, retried: 0, retryURLs: []};
   const policy = {mode: 'ap', root: '/sdcard/books', free_bytes: 100000000, file_limit: bookLimit, wifi_configured: false,
-    fonts_enabled: fontsEnabled, font_root: '/sdcard/fonts', font_limit: 33554432};
+    fonts_enabled: fontsEnabled, fonts_only: fontsOnly, font_root: '/sdcard/fonts', font_limit: 33554432};
   const fetch = async (url, options = {}) => {
     state.requested.push(url);
     let status = 200, body;
@@ -112,5 +112,11 @@ async function setup({existing = false, confirmations = [], responses = [], dele
   t = await setup({responses: ['pending']}); const fonts = [t.item('One.ttf', 'font'), t.item('Two.ttf', 'font')];
   const fontPending = t.run(fonts); await flush(); t.nodes.get('cancel').onclick(); await fontPending;
   assert.equal(t.state.sent.length, 1); assert.match(fonts[1].row.textContent, /未上传/);
-  console.log('transfer web interaction tests passed');
+  t = await setup({fontsOnly:true});
+  assert(t.nodes.get('bookUpload').hidden && t.nodes.get('bookManagement').hidden);
+  assert(!t.state.requested.some(url=>url.startsWith('/books')));
+  item=t.item('book.txt');await t.run([item]);assert.match(item.row.textContent,/仅导入字体/);assert.equal(t.state.sent.length,0);
+  item=t.item('Allowed.ttf','font');await t.run([item]);assert.match(t.state.sent[0],/^\/fonts\?/);
+  assert.equal(t.nodes.get('cancel').hidden,undefined);
+  console.log('transfer web interaction tests passed (including isolated font-child upload)');
 })().catch(error => { console.error(error); process.exitCode = 1; });

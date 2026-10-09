@@ -7,6 +7,7 @@
  * Frozen: Pickup requires FAST and a ready sensor; unified lifecycle owns power changes.
  */
 #include "app.h"
+#include "folio_metrics.h"
 #include "folio_ui.h"
 #include "folio_navigation.h"
 #include "ui_kit.h"
@@ -89,5 +90,6 @@ static app_redraw_t on_key(app_ctx_t *ctx,int key){
     if(key==UI_KEY_3)ctx->request_menu=true;
     return APP_REDRAW_NONE;
 }
-const app_desc_t app_folio_sleep={.title="休眠与唤醒",.detail="FAST / ECO 与壁纸",.owns_keys=true,.owns_footer=true,
+static int folio_page_metric_scene(void) { return FOLIO_METRICS_SLEEP; }
+const app_desc_t app_folio_sleep={ .metrics_scenario=folio_page_metric_scene,.title="休眠与唤醒",.detail="FAST / ECO 与壁纸",.owns_keys=true,.owns_footer=true,
     .on_enter=on_enter,.render=render,.on_gesture=on_gesture,.on_key=on_key};

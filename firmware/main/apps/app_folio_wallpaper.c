@@ -3,6 +3,7 @@
  * TF wallpaper selection, preview and apply; preview never changes the active choice.
  */
 #include "app.h"
+#include "folio_metrics.h"
 #include "folio_ui.h"
 #include "wallpaper.h"
 #include "settings.h"
@@ -105,5 +106,6 @@ static app_redraw_t key(app_ctx_t* ctx,int key) {
     if (key == UI_KEY_3) ctx->request_menu = true;
     return APP_REDRAW_NONE;
 }
-const app_desc_t app_folio_wallpaper = {.title="休眠壁纸",.detail="TF 图片预览与应用",.owns_keys=true,.owns_footer=true,
+static int folio_page_metric_scene(void) { return FOLIO_METRICS_SETTINGS; }
+const app_desc_t app_folio_wallpaper = { .metrics_scenario=folio_page_metric_scene,.title="休眠壁纸",.detail="TF 图片预览与应用",.owns_keys=true,.owns_footer=true,
     .on_enter=enter,.on_exit=leave,.on_media_lost=lost,.render=render,.on_gesture=gesture,.on_key=key};

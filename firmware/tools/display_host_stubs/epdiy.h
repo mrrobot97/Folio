@@ -2,6 +2,8 @@
  * 显示硬件主机替身。/ Display hardware host shim.
  */
 #pragma once
+int epd_rotated_display_width(void);
+int epd_rotated_display_height(void);
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

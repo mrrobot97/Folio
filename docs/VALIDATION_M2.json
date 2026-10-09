@@ -1,0 +1,174 @@
+{
+  "milestone": "Folio 0.2.0 / M2 closeout",
+  "recorded_utc": "2026-10-09T10:15:14.678451+00:00",
+  "evidence_level": "host regression and ESP-IDF defaults/metrics builds; no hardware",
+  "source_fingerprint": {
+    "sha256": "4f757bd40db1c5412936ddec8f1577da772e20fde68fe28fba95426751a34606",
+    "file_count": 259,
+    "selection": "indexed firmware build/deployment inputs; source_fingerprint.py"
+  },
+  "source_correspondence": "Indexed firmware input hashes are identical before and after both builds; staged firmware contents equal working files. Recompute with python3 scripts/source_fingerprint.py from the commit containing this receipt. Build timestamps/paths can change binary hashes on a later rebuild.",
+  "idf_commit": "fff9895c82d744c7237be8847347bdd1b07c6643",
+  "compiler": "xtensa-esp-elf-gcc (crosstool-NG esp-15.2.0_20251204) 15.2.0",
+  "builds": [
+    {
+      "configuration": "default",
+      "command": "bash scripts/build_firmware.sh",
+      "result": "passed",
+      "project_version": "0.2.0",
+      "application": {
+        "path": "firmware/build/Read_Pico.bin",
+        "bytes": 3206992,
+        "sha256": "dd613733310c2d6740718fd85a5031f1bc8be8a4af441a947acfaa96a42c6ba5"
+      },
+      "application_slot_bytes": 4194304,
+      "application_slot_free_bytes": 987312,
+      "sdkconfig": {
+        "path": "firmware/sdkconfig",
+        "bytes": 88581,
+        "sha256": "cae36bdd68015fbefceaa1d66784a1cac7ce6b68d461433f33f2e0aa0a938ec1"
+      },
+      "bootloader": {
+        "path": "firmware/build/bootloader/bootloader.bin",
+        "bytes": 21168,
+        "sha256": "83ad68446b1667aa3332c87603567876d6d2db9b15ed72251326a7e9794e91c1"
+      },
+      "partition_table": {
+        "path": "firmware/build/partition_table/partition-table.bin",
+        "bytes": 3072,
+        "sha256": "205e21ddff471bce79c29a846bd04a48854cb42d406c784405d4c8e3ec1e6061"
+      }
+    },
+    {
+      "configuration": "metrics",
+      "command": "bash scripts/build_firmware.sh -B \"$PWD/build/metrics\" -DSDKCONFIG=\"$PWD/build/metrics/sdkconfig\" '-DSDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.metrics'",
+      "result": "passed",
+      "project_version": "0.2.0",
+      "application": {
+        "path": "build/metrics/Read_Pico.bin",
+        "bytes": 3209472,
+        "sha256": "9c40ec85b224f2446f64b070a61989e1b7df5d323c8c3e74b268ddc8e1d08456"
+      },
+      "application_slot_bytes": 4194304,
+      "application_slot_free_bytes": 984832,
+      "sdkconfig": {
+        "path": "build/metrics/sdkconfig",
+        "bytes": 88559,
+        "sha256": "f2d03ba424f8a1e4559dea348d74f690516a8361c9f78255116c4c55fffd3fd0"
+      },
+      "bootloader": {
+        "path": "build/metrics/bootloader/bootloader.bin",
+        "bytes": 21168,
+        "sha256": "2627fe4b6910455b8f15616249883589f0c5ea4a6d27940596a522b706990e8e"
+      },
+      "partition_table": {
+        "path": "build/metrics/partition_table/partition-table.bin",
+        "bytes": 3072,
+        "sha256": "205e21ddff471bce79c29a846bd04a48854cb42d406c784405d4c8e3ec1e6061"
+      }
+    }
+  ],
+  "ui_font": {
+    "path": "firmware/main/assets/builtin.ttf",
+    "bytes": 573400,
+    "sha256": "80c4be1897a28bd565f1936b4bbe6f17917a1d917c6e107e605413faef9955f7",
+    "coverage_scanned_codepoints": 1064,
+    "coverage_result": "passed",
+    "variable_weight": true,
+    "family": "Read Pico UI",
+    "license": "OFL-1.1"
+  },
+  "tests": [
+    {
+      "command": "bash scripts/test_system.sh",
+      "result": "passed",
+      "scope": "settings/NVS, storage/delete, clock and wallpaper",
+      "local_log_sha256": "19263ee5d5a78aa9c187f80febd2c4528e4be1146089b4bb4fa39207eb501147"
+    },
+    {
+      "command": "sh scripts/test_reader.sh",
+      "result": "passed",
+      "scope": "576 checks",
+      "local_log_sha256": "350da14876707cdd4f1955175663bd8adbb38db44e8d4153b294e8890f30cef2"
+    },
+    {
+      "command": "sh scripts/test_reader_format.sh",
+      "result": "passed",
+      "scope": "1381 checks including I/O faults, OOM, cold recovery and free-space preflight",
+      "local_log_sha256": "3eff4559c93b45a6f640d0bb317cf1f186cb685ec806ef24ce9d63d5ac328bc2"
+    },
+    {
+      "command": "sh scripts/test_reader_device.sh",
+      "result": "passed",
+      "scope": "production service/font/layout with extracted reader callbacks; migration, 129th-book restart/cancel/sleep/discard",
+      "local_log_sha256": "a4956481ab40c6d54a629b7a6ecdd469b38b947d46fbcb0d05511ee2cddf29c0"
+    },
+    {
+      "command": "bash scripts/test_fonts.sh",
+      "result": "passed",
+      "scope": "2098 production-font checks",
+      "local_log_sha256": "5430c475f7feec873868d17861533f5d60ba406d9f492be22e0dfb8c0a95b2fe"
+    },
+    {
+      "command": "sh tests/power/run.sh",
+      "result": "passed",
+      "scope": "26 cases",
+      "local_log_sha256": "5888766f99ab8250fff5cdea3b30b052f419b5fa8f385111c5f75572e597a943"
+    },
+    {
+      "command": "sh tests/ui/run.sh build/ui-m2-final",
+      "result": "passed",
+      "scope": "production callbacks, routes, calendar and pixel containment",
+      "local_log_sha256": "012baaa67b100c5cd3ce7e1cf75c186aef73a615e8eeb9489ec4c3bcbc8d67a8"
+    },
+    {
+      "command": "sh tests/ui/run_format.sh",
+      "result": "passed",
+      "scope": "production format UI/font renderer with injected service outcomes",
+      "local_log_sha256": "c1f24378505021cf3ea677fee0440070dc6a5c1286025f23b37c0437a1b6ec55"
+    },
+    {
+      "command": "sh tests/metrics/run.sh",
+      "result": "passed",
+      "scope": "enabled/disabled C tests plus 7 analyzer tests",
+      "local_log_sha256": "187f11d06c38984f13899cc4906c8db5a4edb3c4bc23c55d7fcd6b0eeae1905b"
+    },
+    {
+      "command": "PATH=\"$PWD/.tools/espressif/python_env/idf6.1_py3.14_env/bin:$PATH\" PYTHONPATH=\"$PWD/.tools/python-assets\" bash firmware/tools/run_book_management_tests.sh",
+      "result": "passed",
+      "scope": "official book/layout/storage/transfer/font/UI/display/LCD/SD suites; 47 loop scenarios",
+      "local_log_sha256": "b256eb388b93b55cc99385951f788c3abcbd4dcf294c0e4200121fc06747d457"
+    },
+    {
+      "command": "cd firmware && node tools/transfer_web_host_test.js",
+      "result": "passed",
+      "scope": "font-child isolation and transfer interactions",
+      "local_log_sha256": "3e20a73e19bba8737e824593e27372fd22e682fce62c629f44cc91730e3eede4"
+    },
+    {
+      "command": "npm --prefix web run build",
+      "result": "passed",
+      "scope": "local bundle with installed esptool-js",
+      "local_log_sha256": "4bb07d675b7c818743094eb75acd65eaed50c422517085c221e1423087b403ba"
+    },
+    {
+      "command": "npm --prefix web test",
+      "result": "passed",
+      "scope": "23 tests",
+      "local_log_sha256": "6d9cc4e5775fa313cf40867d8f32586d9b1ecbe5fc2f3ecab9cce7324c182b87"
+    }
+  ],
+  "protected_upstream": "383 imported files present; BSP, PMU, SY7636A, waveform and epdiy match fixed upstream manifest.",
+  "limits": [
+    "No hardware connection, flashing, actual FAT cut-power test, current or panel latency measurement.",
+    "128-book format quota is an engineering limit; actual FAT and shared NVS capacity may be lower.",
+    "Progress v3 is not understood by old firmware; downgrade compatibility remains unverified.",
+    "354-board design coverage, automatic sleep and product OTA/boot-health flow remain incomplete.",
+    "Unlinked compressed-image drafts remain local and are excluded from this milestone.",
+    "No Pages enablement or public Release."
+  ],
+  "nonblocking_diagnostics": [
+    "ESP-IDF v6.1 upstream FATFS Kconfig bool-default notes.",
+    "Upstream cJSON sprintf deprecation warnings on macOS host test compilation."
+  ]
+}

@@ -9,6 +9,6 @@ gc_sections=(-Wl,--gc-sections)
 if [[ $(uname -s) == Darwin ]]; then gc_sections=(-Wl,-dead_strip); fi
 cc -std=c11 -Wall -Wextra -Werror -g -fsanitize=address,undefined \
     -ffunction-sections -fdata-sections "${gc_sections[@]}" \
-    -Itools/display_host_stubs -Imain -Imain/app \
+    -Itools/display_host_stubs -Imain -Imain/app -Imain/folio \
     tools/display_host_test.c main/display.c -o build/book-tests/display
 build/book-tests/display

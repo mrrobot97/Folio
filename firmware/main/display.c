@@ -17,6 +17,7 @@
 #include "e0470_epaper_waveform.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "folio_metrics.h"
 
 static const char* TAG = "read_pico";
 static bool s_bulk_io;
@@ -87,11 +88,17 @@ static enum EpdDrawError hl_update(
             ESP_LOGI(TAG, "promote to GC16 after %d soft refreshes", APP_GC16_EVERY);
         }
     }
+    folio_metrics_span_t span = folio_metrics_begin();
+    enum EpdDrawError result;
     if (area != NULL) {
-        return full ? epd_hl_update_area_full(hl, mode, 25, *area)
-                    : epd_hl_update_area(hl, mode, 25, *area);
-    }
-    return full ? epd_hl_update_screen_full(hl, mode, 25) : epd_hl_update_screen(hl, mode, 25);
+        result = full ? epd_hl_update_area_full(hl, mode, 25, *area)
+                      : epd_hl_update_area(hl, mode, 25, *area);
+    } else result = full ? epd_hl_update_screen_full(hl, mode, 25) : epd_hl_update_screen(hl, mode, 25);
+    folio_metrics_display_end(span,(uint32_t)mode,
+        waveform == &E0470_FOLLOW_WAVEFORM ? FOLIO_METRICS_WAVE_FOLLOW : FOLIO_METRICS_WAVE_PANEL,
+        area ? area->x : 0, area ? area->y : 0,
+        area ? area->width : epd_rotated_display_width(), area ? area->height : epd_rotated_display_height(),result);
+    return result;
 }
 
 enum EpdDrawError update_display_mode(
@@ -110,7 +117,11 @@ enum EpdDrawError update_display_from_white_with(
     use_scan_for(waveform, mode);
     epd_poweron();
     epd_hl_waveform(hl, waveform);
+    folio_metrics_span_t span = folio_metrics_begin();
     enum EpdDrawError result = epd_hl_update_screen_from_white(hl, mode, 25);
+    folio_metrics_display_end(span,(uint32_t)mode,
+        waveform == &E0470_FOLLOW_WAVEFORM ? FOLIO_METRICS_WAVE_FOLLOW : FOLIO_METRICS_WAVE_PANEL,
+        0,0,epd_rotated_display_width(),epd_rotated_display_height(),result);
     epd_hl_waveform(hl, &E0470_WAVEFORM);
     s_soft_refreshes = 0;
     rails_keepalive();
@@ -188,7 +199,10 @@ void guard_draw_result(EpdiyHighlevelState* hl, enum EpdDrawError result) {
     epd_clear();
     // 清物理屏后仅重置旧帧基准，保留目标页；否则局部刷新会留下整页白屏。
     // Reset only the old-frame baseline after clearing; preserving the target prevents blank pages after partial updates.
-    epd_hl_update_screen_from_white(hl, MODE_GC16, 25);
+    folio_metrics_span_t span = folio_metrics_begin();
+    enum EpdDrawError recovery = epd_hl_update_screen_from_white(hl, MODE_GC16, 25);
+    folio_metrics_display_end(span,MODE_GC16,FOLIO_METRICS_WAVE_PANEL,
+        0,0,epd_rotated_display_width(),epd_rotated_display_height(),recovery);
     s_soft_refreshes = 0;
     rails_keepalive();
     ESP_LOGW(TAG, "line queue underrun, pclk back to %d MHz", DISPLAY_PCLK_SAFE_MHZ);

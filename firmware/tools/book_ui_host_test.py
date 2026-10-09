@@ -74,7 +74,8 @@ static char s_message[128],s_shelf_warning[128],s_storage[128];
 static bool s_pending_invalidated,test_oom,test_degraded;
 static unsigned s_store_revision;
 typedef struct {char path[288];bool is_flash;} book_store_root_t;
-typedef struct {uint32_t file_size;uint16_t chapter;uint32_t byte_off;uint8_t px,pct;uint32_t last_open_s;} book_progress_t;
+typedef struct {uint32_t file_size;uint16_t chapter;uint32_t byte_off;uint8_t px,pct,format;uint32_t last_open_s;} book_progress_t;
+enum {BOOK_PROGRESS_NATIVE,BOOK_PROGRESS_FOLIO_EM,BOOK_PROGRESS_TRANSIENT_DEFAULTS,BOOK_PROGRESS_FOLIO_NATIVE};
 typedef struct book_progress_watch {char path[288];atomic_bool invalidated;struct book_progress_watch* next;} book_progress_watch_t;
 static book_progress_watch_t* test_watches;
 static book_progress_watch_t* book_progress_watch_create(const char* path){book_progress_watch_t* w=calloc(1,sizeof(*w));assert(w);strcpy(w->path,path);atomic_init(&w->invalidated,false);w->next=test_watches;test_watches=w;return w;}
@@ -98,16 +99,20 @@ static char s_latest_path[288],test_last_path[288];
 static bool s_save_failed;
 // Folio 服务在其它主机套件中测真实持久化；这里仅记录生命周期适配调用。
 // Other host suites test real Folio persistence; these stubs verify lifecycle adapter calls only.
-static bool s_reader_active,s_obscured,s_stats_failed;
+static bool s_reader_active,s_obscured,s_stats_failed,s_formatted,s_format_retained,s_sleeping,test_transient;
+static int64_t s_book_mtime;
+static const char* s_blocked_reason="";
+static struct{uint8_t legacy_native_px;} s_active_format;
+static bool folio_format_read_baseline_pending(const char* path){(void)path;return test_transient;}
+static bool folio_reader_format_resume_resources(void){return true;}
 static enum {ENTRY_DEFAULT,ENTRY_LIBRARY,ENTRY_RESUME,ENTRY_PATH,ENTRY_SEARCH} s_entry;
-static unsigned test_activity_calls,test_pause_calls,test_stats_checkpoints,test_draft_checkpoints,test_draft_begins;
+static unsigned test_activity_calls,test_pause_calls,test_stats_checkpoints,test_draft_checkpoints;
 static int64_t test_activity_ms,test_pause_ms;
 static bool test_stats_ok=true,test_draft_ok=true;
 static void folio_reading_activity(int64_t now){test_activity_calls++;test_activity_ms=now;}
 static void folio_reading_pause(int64_t now){test_pause_calls++;test_pause_ms=now;}
 static bool folio_reading_checkpoint(void){test_stats_checkpoints++;return test_stats_ok;}
 static bool checkpoint_draft(void){test_draft_checkpoints++;return test_draft_ok;}
-static void draft_begin(void){test_draft_begins++;}
 static int64_t esp_timer_get_time(void){return 4567000;}
 static char s_path[288], s_resume_path[288];
 #define BOOK_STORE_PATH_MAX 288
@@ -331,10 +336,20 @@ int main(void) {
     s_entry=ENTRY_SEARCH;on_enter(&ctx);assert(!s_resume_pending);
     s_entry=ENTRY_RESUME;on_enter(&ctx);assert(s_resume_pending);
     s_view=READING;s_scan_pending=s_toolbar=s_image_open=s_clear_confirm=false;s_resume_path[0]=0;
-    unsigned begins=test_draft_begins;ctx.now_ms=7890;
-    assert(on_key(&ctx,UI_KEY_2)==APP_REDRAW_PAGE&&s_toolbar&&test_draft_begins==begins+1);
+    drafts=test_draft_checkpoints;ctx.now_ms=7890;
+    assert(on_key(&ctx,UI_KEY_2)==APP_REDRAW_PAGE&&s_toolbar&&test_draft_checkpoints==drafts);
     assert(test_activity_ms==7890);
-    assert(on_key(&ctx,UI_KEY_2)==APP_REDRAW_PAGE&&!s_toolbar&&test_draft_begins==begins+1);
+    assert(on_key(&ctx,UI_KEY_2)==APP_REDRAW_PAGE&&!s_toolbar&&test_draft_checkpoints==drafts);
+    // 实际save_progress适配必须写对v3来源：临时默认、em和保留native不能混淆。
+    // The real save_progress adapter must distinguish transient defaults, em and retained native units.
+    snprintf(s_path,sizeof(s_path),"%s/format-marker.txt",test_roots[0].path);
+    FILE* marker=fopen(s_path,"wb");assert(marker);for(int i=0;i<1024;i++)fputc('x',marker);assert(!fclose(marker));
+    struct stat marker_stat;assert(!stat(s_path,&marker_stat));s_file_size=marker_stat.st_size;s_book_mtime=marker_stat.st_mtime;
+    s_text="fixture";s_page=1;s_px=56;s_formatted=true;test_transient=true;test_save_error=test_last_error=0;
+    assert(pending_reserve(s_path));pending_mark_latest(s_path);save_progress();assert(pending_find(s_path)->value.format==BOOK_PROGRESS_TRANSIENT_DEFAULTS&&pending_find(s_path)->value.px==56);
+    test_transient=false;save_progress();assert(pending_find(s_path)->value.format==BOOK_PROGRESS_FOLIO_EM);
+    s_px=36;s_active_format.legacy_native_px=48;save_progress();assert(pending_find(s_path)->value.format==BOOK_PROGRESS_FOLIO_NATIVE&&pending_find(s_path)->value.px==48);
+    assert(!unlink(s_path));s_text=NULL;s_formatted=false;
     free(s_shelf);
     while(s_pending)pending_discard(s_pending->path);
     for(int i=0;i<65;i++){char path[340];snprintf(path,sizeof(path),"%s/book%03d.txt",test_roots[0].path,i);unlink(path);}rmdir(test_roots[0].path);

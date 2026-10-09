@@ -34,21 +34,41 @@ void folio_ui_sample_status(folio_status_t *out) {
 
 // 设计字号是 CJK em；上游 API 是 ascent-descent 高度。/ Design size is CJK em; upstream uses ascent-descent height.
 static int font_pixels(int em) {
-    int advance = ttf_text_width_px(100, "中");
-    int px = advance > 0 ? (em * 100 + advance / 2) / advance : em;
+    int px = ttf_font_pixel_height_for_em(em);
     return px > 120 ? 120 : px < 12 ? 12 : px;
 }
 
 void folio_ui_text(uint8_t *fb, int x, int y, int px, const char *text,
                    enum EpdFontFlags align, uint8_t ink, uint8_t paper) {
+    folio_ui_text_weight(fb,x,y,px,text,align,ink,paper,400);
+}
+void folio_ui_text_weight(uint8_t *fb, int x, int y, int px, const char *text,
+                          enum EpdFontFlags align, uint8_t ink, uint8_t paper, int weight) {
+    ttf_font_scope_t scope;
+    if (ttf_font_begin(TTF_ROLE_UI,&scope) != ESP_OK) return;
+    int previous = ttf_get_weight();
+    ttf_set_weight(weight);
     ttf_draw_text_px(fb, x, y + (px * 88 + 50) / 100, font_pixels(px), text, align, ink >> 4, paper >> 4);
+    ttf_set_weight(previous);
+    ttf_font_end(&scope);
+}
+int folio_ui_text_width(int em, const char* text) {
+    if (!text) return 0;
+    ttf_font_scope_t scope;
+    if (ttf_font_begin(TTF_ROLE_UI,&scope) != ESP_OK) return 0;
+    int previous = ttf_get_weight();
+    ttf_set_weight(400);
+    int width = ttf_text_width_px(font_pixels(em),text);
+    ttf_set_weight(previous);
+    ttf_font_end(&scope);
+    return width;
 }
 
 void folio_ui_text_fit(uint8_t *fb, int x, int y, int px, int width,
                        const char *text, uint8_t ink, uint8_t paper) {
     char clipped[256];
     if (!text || width <= 0) return;
-    if (strlen(text) < sizeof(clipped) && ttf_text_width_px(font_pixels(px), text) <= width) {
+    if (strlen(text) < sizeof(clipped) && folio_ui_text_width(px, text) <= width) {
         folio_ui_text(fb, x, y, px, text, EPD_DRAW_ALIGN_LEFT, ink, paper);
         return;
     }
@@ -59,7 +79,7 @@ void folio_ui_text_fit(uint8_t *fb, int x, int y, int px, int width,
         if (strlen((const char *)p) < bytes || used + bytes + 4 >= sizeof(clipped)) break;
         memcpy(clipped + used, p, bytes);
         memcpy(clipped + used + bytes, "…", 4);
-        if (ttf_text_width_px(font_pixels(px), clipped) > width) break;
+        if (folio_ui_text_width(px, clipped) > width) break;
         used += bytes; p += bytes;
     }
     memcpy(clipped + used, "…", 4);
@@ -122,7 +142,7 @@ void folio_ui_status(uint8_t *fb, const folio_status_t *s) {
 void folio_ui_header(uint8_t *fb,const folio_status_t *s,const char *title,bool back){
     ui_clear_page(fb);folio_ui_status(fb,s);
     if(back)folio_ui_chevron(fb,62,126,true);
-    folio_ui_text(fb,back?105:40,89,44,title,EPD_DRAW_ALIGN_LEFT,FOLIO_INK,0xFF);
+    folio_ui_text_weight(fb,back?105:40,89,44,title,EPD_DRAW_ALIGN_LEFT,FOLIO_INK,0xFF,700);
 }
 void folio_ui_button(uint8_t *fb,EpdRect hit,const char *label,bool primary){
     EpdRect visible={hit.x,hit.y+12,hit.width,hit.height-24};
@@ -131,7 +151,7 @@ void folio_ui_button(uint8_t *fb,EpdRect hit,const char *label,bool primary){
     folio_ui_text(fb,hit.x+hit.width/2,hit.y+(hit.height-30)/2-2,30,label,EPD_DRAW_ALIGN_CENTER,primary?0xFF:FOLIO_INK,bg);
 }
 void folio_ui_row(uint8_t *fb,int y,const char *label,const char *value,uint8_t paper){
-    int value_width=value?ttf_text_width_px(font_pixels(26),value):0;
+    int value_width=value?folio_ui_text_width(26,value):0;
     folio_ui_text_fit(fb,40,y+28,32,550-value_width-20,label,FOLIO_INK,paper);
     if(value)folio_ui_text(fb,590,y+32,26,value,EPD_DRAW_ALIGN_RIGHT,FOLIO_SECONDARY,paper);
     folio_ui_chevron(fb,623,y+50,false);ui_hairline(fb,y+110,40,604,FOLIO_RULE);

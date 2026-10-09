@@ -234,6 +234,8 @@ static int64_t bench_rest_us(const ttf_bench_stats_t* s) {
 }
 
 static int draw_sample_lines(uint8_t* fb, int y, int spec_w, int n) {
+    ttf_font_scope_t scope;
+    if (ttf_font_begin(TTF_ROLE_READER,&scope) != ESP_OK) return y;
     const int old = ttf_get_weight();
     const int wght = current_wght();
     for (int i = 0; i < n; i++) {
@@ -246,13 +248,12 @@ static int draw_sample_lines(uint8_t* fb, int y, int spec_w, int n) {
             EPD_DRAW_ALIGN_LEFT, false
         );
         ttf_set_weight(wght);
-        ui_text(
-            fb, UI_MARGIN + spec_w, y, line->px, line->text,
-            EPD_DRAW_ALIGN_LEFT, false
-        );
+        ttf_draw_text_px(fb,UI_MARGIN + spec_w,y + ttf_ascender_px(line->px),line->px,
+                         line->text,EPD_DRAW_ALIGN_LEFT,UI_INK_BLACK,UI_INK_WHITE);
         y += line->px + UI_GAP;
     }
     ttf_set_weight(old);
+    ttf_font_end(&scope);
     return y;
 }
 

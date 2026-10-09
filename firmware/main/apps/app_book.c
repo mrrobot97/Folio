@@ -62,6 +62,9 @@
 #include "reader_draft.h"
 #include "reading_service.h"
 #include "folio_clock.h"
+#include "format_service.h"
+#include "format_store.h"
+#include "folio_ui.h"
 #include "settings.h"
 #include "ttf_font.h"
 #include "ui_kit.h"
@@ -96,6 +99,12 @@ extern const app_desc_t app_book;
 static enum { ENTRY_DEFAULT, ENTRY_LIBRARY, ENTRY_RESUME, ENTRY_PATH, ENTRY_SEARCH } s_entry;
 static char s_entry_path[BOOK_STORE_PATH_MAX];
 static folio_reader_draft_t s_draft;
+static folio_format_values_t s_active_format, s_prepared_format;
+static uint64_t s_active_format_revision;
+static bool s_formatted, s_format_retained;
+static book_layout_candidate_t* s_format_layout;
+static size_t s_format_anchor;
+static char s_book_title[128];
 static bool s_draft_pending, s_obscured, s_sleeping, s_reader_active;
 static const char* s_blocked_reason = "";
 static bool s_stats_failed, s_draft_failed;
@@ -146,6 +155,7 @@ static size_t s_image_block = SIZE_MAX;
 static const char* s_image_error;
 static char s_image_origin[224];
 static uint32_t s_file_size;
+static int64_t s_book_mtime;
 static int s_px, s_turns, s_unsaved;
 static int64_t s_poll_ms, s_last_turn_ms, s_size_settle_ms, s_sensor_ms;
 static bool s_shake_enabled, s_sensor_on;
@@ -181,18 +191,6 @@ static bool checkpoint_draft(void) {
     if (!s_draft_failed) s_draft_pending = false;
     return !s_draft_failed;
 }
-static void draft_begin(void) {
-    if (!s_text || !s_path[0]) return;
-    bool starting = !s_draft.editing;
-    folio_reader_draft_begin(&s_draft, s_path, s_file_size, s_px);
-    if (starting) {
-        snprintf(s_draft.font_path, sizeof(s_draft.font_path), "%s", ttf_font_path());
-        struct stat resource;
-        s_draft.font_file_size = !ttf_font_path_is_builtin(s_draft.font_path) && stat(s_draft.font_path, &resource) == 0 ? (uint32_t)resource.st_size : 0;
-        s_draft.book_mtime = stat(s_path, &resource) == 0 ? (uint64_t)resource.st_mtime : 0;
-    }
-    s_draft_pending = true;
-}
 static void draw_control(uint8_t* fb, EpdRect rect, const char* label, int id) {
     if (id == 112 && s_query[0]) {
         ui_fill_round_rect(fb, rect, UI_BTN_RADIUS, UI_GRAY_BLACK);
@@ -208,14 +206,42 @@ static void unlock_draw(void) { if (s_draw_lock) xSemaphoreGive(s_draw_lock); }
 static size_t fb_bytes(void) { return (size_t)epd_width() * epd_height() / 2; }
 // 旋转后差分列向32像素对齐，分界必须落在对齐边上才不会驱动进度条。
 // Rotated diff columns expand to 32 pixels; align the boundary so body updates cannot drive the track.
-static EpdRect reader_area(void) { return (EpdRect){0, 0, UI_LOCK_WIDTH, (UI_BAR_TOP / 32) * 32}; }
+static EpdRect reader_area(void) { return (EpdRect){0, 0, UI_LOCK_WIDTH, s_formatted ? (s_active_format.footer_visible ? 1120 : 1216) : (UI_BAR_TOP / 32) * 32}; }
+static EpdRect format_body_rect(const folio_format_values_t* values) {
+    int margin = folio_format_margin_pixels(values);
+    int top = values->header_visible ? 120 : 24;
+    int bottom = values->footer_visible ? 1120 : 1216;
+    return (EpdRect){margin, top, UI_LOCK_WIDTH - 2 * margin, bottom - top - 16};
+}
 static EpdRect body_rect(void) {
+    if (s_formatted) return format_body_rect(&s_active_format);
     int top = ttf_font_is_builtin() ? 140 : 24;
     return (EpdRect){UI_MARGIN, top, ui_content_width(), UI_BAR_TOP - 8 - top};
 }
 static EpdRect progress_rect(void) {
+    if (s_formatted) return (EpdRect){0, 1120, UI_LOCK_WIDTH, 96};
     EpdRect b = ui_bar_rect(0, 1);
     return (EpdRect){b.x, UI_BAR_TOP, b.width, UI_BAR_H};
+}
+static bool layout_begin_active(const char* text,size_t len,const blk_t* blocks,size_t count,EpdRect rect,int px) {
+    if (!s_formatted) return book_layout_begin_blocks(text,len,blocks,count,rect,px);
+    ttf_font_scope_t font;
+    if (ttf_font_begin(TTF_ROLE_READER,&font)!=ESP_OK) return false;
+    bool ok=book_layout_begin_formatted(text,len,blocks,count,rect,&s_active_format);
+    ttf_font_end(&font); return ok;
+}
+static bool layout_extend_active(size_t pages) {
+    if (!s_formatted) return book_layout_extend(pages);
+    ttf_font_scope_t font;if(ttf_font_begin(TTF_ROLE_READER,&font)!=ESP_OK)return false;
+    bool ok=book_layout_extend(pages);ttf_font_end(&font);return ok;
+}
+static bool layout_build_active(const char* text,size_t len,const blk_t* blocks,size_t count,EpdRect rect,int px) {
+    return layout_begin_active(text,len,blocks,count,rect,px)&&layout_extend_active(4096);
+}
+static size_t layout_image_at_active(size_t page,EpdRect rect,int x,int y,EpdRect* hit) {
+    if(!s_formatted)return book_layout_image_at(page,rect,x,y,hit);
+    ttf_font_scope_t font;if(ttf_font_begin(TTF_ROLE_READER,&font)!=ESP_OK)return SIZE_MAX;
+    size_t found=book_layout_image_at(page,rect,x,y,hit);ttf_font_end(&font);return found;
 }
 static EpdRect row_rect(int row, bool toc) {
     int h = toc ? (UI_CONTENT_BOTTOM - UI_CONTENT_TOP) / BOOK_TOC_ROWS : UI_BTN_H + UI_GAP;
@@ -526,14 +552,22 @@ static void save_progress(void) {
     bool was_failed = s_save_failed;
     pending_progress_t* pending = pending_find(s_path);
     if (!pending) { s_save_failed = true; return; }
+    if(s_formatted){
+        struct stat current;
+        if(book_progress_watch_invalidated(pending->watch)||stat(s_path,&current)||(uint64_t)current.st_size!=s_file_size||current.st_mtime!=s_book_mtime){
+            s_save_failed=true;s_blocked_reason="原图书已改变，未将旧页码写入新文件";return;
+        }
+    }
     book_progress_t p = {
         .file_size = s_file_size, .chapter = (uint16_t)s_chapter,
         .byte_off = (uint32_t)book_layout_page_start_offset(s_page),
-        .px = (uint8_t)s_px, .pct = (uint8_t)percent(s_page),
+        .px = (uint8_t)(s_formatted&&s_active_format.legacy_native_px?s_active_format.legacy_native_px:s_px), .pct = (uint8_t)percent(s_page),
+        .format = !s_formatted?BOOK_PROGRESS_NATIVE:folio_format_read_baseline_pending(s_path)?BOOK_PROGRESS_TRANSIENT_DEFAULTS:
+            s_active_format.legacy_native_px?BOOK_PROGRESS_FOLIO_NATIVE:BOOK_PROGRESS_FOLIO_EM,
         .last_open_s = 0,
     };
     if (!pending->dirty || pending->value.file_size != p.file_size || pending->value.chapter != p.chapter ||
-        pending->value.byte_off != p.byte_off || pending->value.px != p.px || pending->value.pct != p.pct) {
+        pending->value.byte_off != p.byte_off || pending->value.px != p.px || pending->value.pct != p.pct || pending->value.format != p.format) {
         pending->value = p;
         pending->progress_saved = false;
     }
@@ -560,7 +594,38 @@ static app_redraw_t close_image(void) {
 }
 
 /* ---- 绘制与预渲染 / Drawing and preparation ---- */
+static void draw_formatted_reader(uint8_t* fb,size_t page) {
+    uint8_t paper=folio_format_paper(&s_active_format),ink=folio_format_ink(&s_active_format);
+    epd_fill_rect((EpdRect){0,0,UI_LOCK_WIDTH,1216},paper*17,fb);
+    ttf_font_scope_t font;
+    if(ttf_font_begin(TTF_ROLE_READER,&font)==ESP_OK){
+        book_layout_draw_page(fb,page,body_rect(),s_px);
+        ttf_font_end(&font);
+    }
+    if(ttf_font_begin(TTF_ROLE_UI,&font)!=ESP_OK)return;
+    if(s_active_format.header_visible){
+        char chapter[180];snprintf(chapter,sizeof(chapter),"%02u  /  %s",(unsigned)s_chapter+1,s_title);
+        folio_ui_text_fit(fb,40,34,26,604,chapter,ink*17,paper*17);
+    }
+    if(s_active_format.footer_visible){
+        uint8_t rule=paper<8?5:paper>13?12:10;
+        uint8_t secondary=paper<8?11:5;
+        epd_draw_line(40,1120,644,1120,rule*17,fb);
+        const char* title=folio_format_read_baseline_pending(s_path)?"排版未确认保存":s_book_title;
+        folio_ui_text_fit(fb,40,1144,24,344,title,secondary*17,paper*17);
+        char progress[64];
+        if(book_layout_complete())snprintf(progress,sizeof(progress),"%u / %u · %u%%",(unsigned)page+1,(unsigned)book_layout_page_count(),percent(page));
+        else snprintf(progress,sizeof(progress),"%u / … · %u%%",(unsigned)page+1,percent(page));
+        if(s_save_failed||s_stats_failed)snprintf(progress,sizeof(progress),"%s",s_save_failed&&s_stats_failed?"进度/时长未保存":s_save_failed?"进度未保存":"时长未保存");
+        folio_ui_text(fb,644,1144,24,progress,EPD_DRAW_ALIGN_RIGHT,secondary*17,paper*17);
+        epd_fill_rect((EpdRect){40,1190,604,3},rule*17,fb);
+        epd_fill_rect((EpdRect){40,1190,(int)(604*percent(page)/100),3},secondary*17,fb);
+    }
+    ttf_font_end(&font);
+}
 static void draw_reader(uint8_t* fb, size_t page) {
+    if (s_formatted) draw_formatted_reader(fb,page);
+    else {
     ui_clear_page(fb);
     book_layout_draw_page(fb, page, body_rect(), s_px);
     if (ttf_font_is_builtin()) {
@@ -587,6 +652,7 @@ static void draw_reader(uint8_t* fb, size_t page) {
     fit_text(name, UI_PX_CAPTION, track.width - ttf_text_width_px(UI_PX_CAPTION, suffix));
     snprintf(line, sizeof(line), "%s%s", name, suffix);
     ui_text(fb, track.x, track.y + 36, UI_PX_CAPTION, line, EPD_DRAW_ALIGN_LEFT, false);
+    }
     if (s_toolbar) {
         EpdRect panel = {UI_MARGIN - 8, tool_rect(0).y - 110, ui_content_width() + 16, BOOK_TOOL_ROWS * (UI_BTN_H + UI_GAP) + 110};
         ui_clear_rect_fast(fb, (EpdRect){panel.x, panel.y - 24, panel.width, panel.height + 24});
@@ -788,7 +854,7 @@ static app_redraw_t paint_reading(app_ctx_t* ctx, enum EpdDrawMode mode) {
     unlock_draw();
     ESP_LOGI(TAG, "paint cached=%d ms=%lld", cached, (esp_timer_get_time() - started) / 1000);
     s_area = reader_area();
-    s_reader_split = true;
+    s_reader_split = !s_formatted || s_active_format.footer_visible;
     s_mode = mode;
     return APP_REDRAW_AREA;
 }
@@ -856,6 +922,7 @@ static void free_book(void) {
     s_text_len = 0;
     book_close();
     s_path[0] = 0;
+    s_formatted = false;
 }
 static bool load_chapter(app_ctx_t* ctx, size_t chapter, size_t offset, bool last_page) {
     loading_detail(ctx, "正在加载和排版…", "长章节需要更多时间，请稍候");
@@ -868,22 +935,30 @@ static bool load_chapter(app_ctx_t* ctx, size_t chapter, size_t offset, bool las
     }
     lock_draw();
     invalidate_prep();
-    bool ok = book_layout_begin_blocks(loaded.utf8, loaded.len, loaded.blocks, loaded.count, body_rect(), s_px);
+    bool ok = layout_begin_active(loaded.utf8, loaded.len, loaded.blocks, loaded.count, body_rect(), s_px);
     // 先完成续读页；其余页由 tick 分批排版，上一章末页仍须定位到末尾。
     // Finish the resume page first; ticks paginate the rest, while previous-chapter navigation needs its end.
     while (ok && !book_layout_complete() &&
            (last_page || book_layout_page_start_offset(book_layout_page_count()) <= offset))
-        ok = book_layout_extend(2);
+        ok = layout_extend_active(2);
     if (!ok) {
+        book_layout_error_t reason=book_layout_last_error(NULL);
+        if(!s_text&&(reason==BOOK_LAYOUT_ERROR_GLYPH||reason==BOOK_LAYOUT_ERROR_FONT_RESOURCE)){
+            s_text=loaded.utf8;s_text_len=loaded.len;s_blocks=loaded.blocks;s_block_count=loaded.count;s_chapter=chapter;s_page=0;
+            s_format_anchor=offset;
+            if(book_chapter_title(chapter,s_title,sizeof(s_title))!=ESP_OK)copy_text(s_title,sizeof(s_title),"正文字体待恢复");
+            copy_text(s_message,sizeof(s_message),"当前字体缺少正文字形，请选择完整字体");unlock_draw();return false;
+        }
         html_text_free(&loaded);
-        bool restored = s_text && book_layout_build_blocks(s_text, s_text_len, s_blocks, s_block_count, body_rect(), s_px);
+        bool restored = s_text && layout_build_active(s_text, s_text_len, s_blocks, s_block_count, body_rect(), s_px);
         unlock_draw();
         if (!restored) {
             free_book();
             s_view = SHELF;
             ctx->leaf = 0;
         }
-        copy_text(s_message, sizeof(s_message), "排版失败：内存不足或章节过长");
+        copy_text(s_message, sizeof(s_message), reason==BOOK_LAYOUT_ERROR_GLYPH?"当前字体缺少正文字形，请选择完整字体":reason==BOOK_LAYOUT_ERROR_FONT_RESOURCE?"正文字体不可读，请恢复原资源":"排版失败：内存不足或章节过长");
+        if(restored&&(reason==BOOK_LAYOUT_ERROR_GLYPH||reason==BOOK_LAYOUT_ERROR_FONT_RESOURCE))(void)folio_format_recover_reader_font(ctx);
         return false;
     }
     free(s_text);
@@ -897,7 +972,7 @@ static bool load_chapter(app_ctx_t* ctx, size_t chapter, size_t offset, bool las
     s_page = last_page ? book_layout_page_count() - 1 : book_layout_page_for_offset(offset);
     if (book_chapter_title(chapter, s_title, sizeof(s_title)) != ESP_OK)
         snprintf(s_title, sizeof(s_title), "第 %u 节", (unsigned)chapter + 1);
-    copy_text(s_font_path, sizeof(s_font_path), ttf_font_path());
+    copy_text(s_font_path, sizeof(s_font_path), s_formatted ? s_active_format.font.path : ttf_font_path());
     s_message[0] = 0;
     unlock_draw();
     return true;
@@ -936,6 +1011,7 @@ static bool open_book(app_ctx_t* ctx, const char* path) {
         }
         s_draft_pending = s_draft_failed = false;
     }
+    if(!folio_format_prepare_book_change(path)){copy_text(s_message,sizeof(s_message),folio_format_error());return false;}
     if (!pending_reserve(path)) {
         copy_text(s_message, sizeof(s_message), "内存不足，无法保留待保存进度");
         return false;
@@ -962,45 +1038,42 @@ static bool open_book(app_ctx_t* ctx, const char* path) {
     }
     copy_text(s_path, sizeof(s_path), path);
     s_file_size = (uint32_t)st.st_size;
+    s_book_mtime=st.st_mtime;
     book_progress_t p = {0};
     bool resume = pending_restore(path, s_file_size, &p) || book_progress_load(path, s_file_size, &p);
     s_px = resume ? p.px : app_settings_book_px();
     if (s_px < BOOK_PX_MIN || s_px > BOOK_PX_MAX) s_px = 48;
-    if (strcmp(s_draft.path, s_path) || s_draft.file_size != s_file_size) {
-        folio_reader_draft_t restored = {0};
-        if (folio_reader_draft_load(FOLIO_STATE_DIRECTORY, s_path, &restored)) s_draft = restored;
-        else memset(&s_draft, 0, sizeof(s_draft));
-        s_draft_pending = false;
+    folio_format_values_t legacy=folio_format_builtin_defaults();legacy.px=s_px;
+    const char* legacy_font=app_settings_font_path();if(!legacy_font||!legacy_font[0])legacy_font=TTF_FONT_BUILTIN;
+    // 先解析按书/默认权威来源；旧全局字体只在真正迁移旧书时检查。
+    // Resolve authoritative book/default values first; inspect the old global font only for actual legacy migration.
+    snprintf(legacy.font.path,sizeof(legacy.font.path),"%s",legacy_font);
+    if(!folio_format_resolve_book(path,s_file_size,st.st_mtime,resume,p.format,&legacy,&s_active_format,&s_active_format_revision)){
+        copy_text(s_message,sizeof(s_message),folio_format_error());free_book();(void)folio_format_open_book_recovery(ctx,path);return false;
     }
-    if (s_draft.editing && (!strcmp(s_draft.path, s_path)) &&
-        (s_draft.file_size != s_file_size || (s_draft.book_mtime && s_draft.book_mtime != (uint64_t)st.st_mtime))) {
-        s_blocked_reason = "图书已更改，原排版草稿已保留";
-        copy_text(s_message, sizeof(s_message), s_blocked_reason); free_book(); return false;
-    }
-    if (s_draft.editing && !strcmp(s_draft.path, s_path) && s_draft.font_path[0]) {
-        struct stat font_stat;
-        if (strcmp(s_draft.font_path, ttf_font_path()) || (!ttf_font_path_is_builtin(s_draft.font_path) &&
-            (stat(s_draft.font_path, &font_stat) || font_stat.st_size != s_draft.font_file_size))) {
-            s_blocked_reason = "请恢复原字体后重试，排版草稿已保留";
-            copy_text(s_message, sizeof(s_message), s_blocked_reason); free_book(); return false;
-        }
-    }
-    // 偏好和草稿封装是排版提交的权威 ACK；NVS 进度中的字号仅作为旧版迁移值。
-    // The preference/draft envelope is the authoritative layout ACK; NVS size is a legacy migration fallback.
-    if (!strcmp(s_draft.path, s_path) && s_draft.file_size == s_file_size) s_px = s_draft.applied_px;
+    if(ttf_font_prepare(TTF_ROLE_READER,s_active_format.font.path)!=ESP_OK){copy_text(s_message,sizeof(s_message),"正文字体加载失败，原排版未变");free_book();return false;}
+    ttf_font_scope_t reader_font;
+    if(ttf_font_begin(TTF_ROLE_READER,&reader_font)!=ESP_OK){free_book();return false;}
+    ttf_set_weight(folio_format_weight_number(&s_active_format));ttf_font_end(&reader_font);
+    s_formatted=true;s_px=s_active_format.px;
+    const char* title=strrchr(path,'/');copy_text(s_book_title,sizeof(s_book_title),title?title+1:path);
     size_t chapter = resume && p.chapter < book_chapter_count() ? p.chapter : 0;
     if (!load_chapter(ctx, chapter, resume && p.chapter == chapter ? p.byte_off : 0, false)) {
+        book_layout_error_t reason=book_layout_last_error(NULL);
+        if(s_text&&(reason==BOOK_LAYOUT_ERROR_GLYPH||reason==BOOK_LAYOUT_ERROR_FONT_RESOURCE)){
+            s_view=READING;s_toolbar=false;
+            if(folio_format_recover_reader_font(ctx))return false;
+        }
         free_book();
         return false;
     }
     s_view = READING;
     s_toolbar = s_clear_confirm = s_batch_confirm = false;
-    if (s_draft.editing && !strcmp(s_draft.path, s_path) && s_draft.file_size == s_file_size && s_draft.applied_px == s_px)
-        s_toolbar = s_draft.editor_visible;
-    else {
-        folio_reader_draft_begin(&s_draft, s_path, s_file_size, s_px);
-        folio_reader_draft_cancel(&s_draft);
-        s_draft_pending = false;
+    // 新包已保留迁移后的完整草稿；不再用旧 M1 来源覆盖新生效配置。
+    // The new envelope retains the migrated full draft; never overwrite it with M1 origin state.
+    folio_format_snapshot_t authoritative;
+    if(folio_format_store_load(FOLIO_STATE_DIRECTORY,FORMAT_BOOK,s_path,&authoritative)==FOLIO_CHECKPOINT_OK&&!authoritative.commit_unknown){
+        folio_reader_draft_cancel(&s_draft);s_draft_pending=s_draft_failed=false;
     }
     const char* book_title = strrchr(s_path, '/');
     (void)folio_reading_open(s_path, book_title ? book_title + 1 : s_path, esp_timer_get_time() / 1000);
@@ -1237,9 +1310,11 @@ static app_redraw_t turn_page(app_ctx_t* ctx, int dir) {
     if (dir > 0 && s_page + 1 >= book_layout_page_count() && !book_layout_complete()) {
         lock_draw();
         invalidate_prep();
-        bool ok = book_layout_extend(2);
+        bool ok = layout_extend_active(2);
         unlock_draw();
         if (!ok) {
+            book_layout_error_t reason=book_layout_last_error(NULL);
+            if(reason==BOOK_LAYOUT_ERROR_GLYPH||reason==BOOK_LAYOUT_ERROR_FONT_RESOURCE){save_progress();if(folio_format_recover_reader_font(ctx))return APP_REDRAW_NONE;}
             free_book(); s_view = SHELF; ctx->leaf = 0;
             copy_text(s_message, sizeof(s_message), "排版失败：内存不足或章节过长");
             return APP_REDRAW_PAGE;
@@ -1265,78 +1340,13 @@ static app_redraw_t turn_page(app_ctx_t* ctx, int dir) {
     return paint_reading(ctx, MODE_GL16);
 }
 static app_redraw_t resize_text(app_ctx_t* ctx, int dir) {
-    draft_begin();
-    if (!folio_reader_draft_adjust(&s_draft, dir)) return APP_REDRAW_NONE;
-    s_draft_pending = true;
-    invalidate_prep();
-    render(ctx, ctx->fb);
-    s_area = (EpdRect){UI_MARGIN - 8, tool_rect(0).y - 134, ui_content_width() + 16,
-                      BOOK_TOOL_ROWS * (UI_BTN_H + UI_GAP) + 134};
-    s_mode = MODE_DU;
-    return APP_REDRAW_AREA;
+    if(!folio_format_begin_book(ctx)||!folio_format_field_begin(FORMAT_FIELD_SIZE_WEIGHT))return APP_REDRAW_NONE;
+    (void)folio_format_size_delta(dir*4);return APP_REDRAW_NONE;
 }
-static app_redraw_t apply_text(app_ctx_t* ctx) {
-    int next = s_draft.draft_px;
-    if (!s_draft.editing) return APP_REDRAW_NONE;
-    if (!s_draft.dirty) {
-        folio_reader_draft_t closed = s_draft;
-        folio_reader_draft_applied(&closed);
-        s_draft_failed = !folio_reader_draft_save(FOLIO_STATE_DIRECTORY, &closed);
-        if (!s_draft_failed) { s_draft = closed; s_draft_pending = false; s_toolbar = false; }
-        return APP_REDRAW_PAGE;
-    }
-    if (next < BOOK_PX_MIN || next > BOOK_PX_MAX) return APP_REDRAW_NONE;
-    size_t off = book_layout_page_start_offset(s_page);
-    save_progress();
-    lock_draw();
-    invalidate_prep();
-    int old = s_px;
-    if (!book_layout_build_blocks(s_text, s_text_len, s_blocks, s_block_count, body_rect(), next)) {
-        bool restored = book_layout_build_blocks(s_text, s_text_len, s_blocks, s_block_count, body_rect(), old);
-        unlock_draw();
-        if (!restored) {
-            free_book();
-            s_view = SHELF;
-            copy_text(s_message, sizeof(s_message), "排版失败，请重新扫描并打开图书");
-            return APP_REDRAW_PAGE;
-        }
-        return APP_REDRAW_NONE;
-    }
-    folio_reader_draft_t committed = s_draft;
-    folio_reader_draft_applied(&committed);
-    s_draft_failed = !folio_reader_draft_save(FOLIO_STATE_DIRECTORY, &committed);
-    if (s_draft_failed) {
-        bool restored = book_layout_build_blocks(s_text, s_text_len, s_blocks, s_block_count, body_rect(), old);
-        if (restored) s_page = book_layout_page_for_offset(off);
-        unlock_draw();
-        if (!restored) { free_book(); s_view = SHELF; copy_text(s_message, sizeof(s_message), "保存失败，旧排版恢复失败，请重新打开"); }
-        return APP_REDRAW_PAGE;
-    }
-    s_px = next;
-    s_page = book_layout_page_for_offset(off);
-    s_draft = committed;
-    s_draft_pending = false;
-    unlock_draw();
-    s_toolbar = false;
-    save_progress();
-    s_size_settle_ms = ctx->now_ms + BOOK_SIZE_SETTLE_MS;
-    return paint_reading(ctx, MODE_DU);
-}
+static app_redraw_t apply_text(app_ctx_t* ctx) { (void)folio_format_begin_book(ctx);return APP_REDRAW_NONE; }
 static void goto_font(app_ctx_t* ctx) {
-    if (s_draft.editing) {
-        // 旧字体页立即改全局字体，不能伪装成 FORMAT_DRAFT 子流程。
-        // The legacy picker applies globally and must not masquerade as a FORMAT_DRAFT child.
-        if (s_draft.dirty) { s_draft_failed = true; s_blocked_reason = "请先应用或取消字号草稿，再选择字体"; return; }
-        folio_reader_draft_t closed = s_draft;
-        folio_reader_draft_cancel(&closed);
-        if (!folio_reader_draft_save(FOLIO_STATE_DIRECTORY, &closed)) { s_draft_failed = true; return; }
-        s_draft = closed; s_draft_pending = false;
-    }
-    // 通过注册表查找，不引用另一个页面符号。/ Find via registry without referencing another page symbol.
-    for (int i = 0; i < app_count(); ++i) {
-        const app_desc_t* app = app_at(i);
-        if (strstr(app->title, " Font")) { save_progress(); ctx->request_app = app; break; }
-    }
+    extern const app_desc_t app_folio_font_picker;
+    if(folio_format_begin_book(ctx)&&folio_format_field_begin(FORMAT_FIELD_FONT)&&folio_format_enter_font_child(false))ctx->request_app=&app_folio_font_picker;
 }
 static app_redraw_t manage_action(app_ctx_t* ctx, uint16_t x, uint16_t y) {
     int count = s_clear_confirm || s_file_removed ? 2 : 3;
@@ -1460,14 +1470,13 @@ static app_redraw_t action_at(app_ctx_t* ctx, uint16_t x, uint16_t y) {
         }
         if (!s_toolbar) {
             lock_draw();
-            size_t block = book_layout_image_at(s_page, body_rect(), x, y, NULL);
+            size_t block = layout_image_at_active(s_page, body_rect(), x, y, NULL);
             unlock_draw();
             if (block != SIZE_MAX) return open_image(ctx, block);
         }
         if (x < UI_LOCK_WIDTH * 3 / 10) return turn_page(ctx, -1);
         if (x >= UI_LOCK_WIDTH * 7 / 10) return turn_page(ctx, 1);
         s_toolbar = !s_toolbar;
-        if (s_toolbar) draft_begin();
         invalidate_prep();
         return APP_REDRAW_PAGE;
     }
@@ -1521,6 +1530,15 @@ static app_redraw_t action_at(app_ctx_t* ctx, uint16_t x, uint16_t y) {
 }
 static void on_enter(app_ctx_t* ctx) {
     s_reader_active = true;
+    if(s_format_retained&&s_text&&s_entry==ENTRY_DEFAULT){
+        if(!folio_reader_format_resume_resources()){
+            lock_draw();free_book();unlock_draw();s_format_retained=false;
+            s_view=SHELF;s_count=s_visible_count=0;s_scan_pending=s_resume_pending=false;
+            s_toolbar=false;ctx->leaf=0;copy_text(s_message,sizeof(s_message),s_blocked_reason);return;
+        }
+        s_format_retained=false;s_view=READING;s_toolbar=false;s_obscured=false;s_sleeping=false;
+        ensure_prep();invalidate_prep();folio_reading_activity(esp_timer_get_time()/1000);return;
+    }
     s_resume_path[0] = 0;
     ensure_prep();
     s_view = SHELF;
@@ -1555,6 +1573,7 @@ static void book_on_exit(app_ctx_t* ctx) {
     s_pressed_control = -1;
     save_progress();
     sensor_set(ctx, false);
+    if(s_format_retained&&s_text){invalidate_prep();return;}
     free_book();
     free(s_shelf);
     s_shelf = NULL;
@@ -1627,7 +1646,7 @@ static int control_at(app_ctx_t* ctx, uint16_t x, uint16_t y, EpdRect* rect) {
         }
         if (!s_toolbar) {
             lock_draw();
-            size_t block = book_layout_image_at(s_page, body_rect(), x, y, rect);
+            size_t block = layout_image_at_active(s_page, body_rect(), x, y, rect);
             unlock_draw();
             if (block != SIZE_MAX) return 1000 + (int)block;
         }
@@ -1734,8 +1753,7 @@ static app_redraw_t on_key(app_ctx_t* ctx, int key) {
         if (s_view == BULK) s_view = SHELF;
         else if (s_view == READING) {
             s_toolbar = !s_toolbar;
-            if (s_toolbar) draft_begin();
-            invalidate_prep();
+                invalidate_prep();
         } else if (s_view == TOC && s_text) {
             s_view = READING;
             s_toolbar = false;
@@ -1811,14 +1829,14 @@ static app_redraw_t on_tick(app_ctx_t* ctx) {
         ESP_LOGI(TAG, "settle du=%u", s_du_count);
         return APP_REDRAW_AREA;
     }
-    if (s_text && strcmp(s_font_path, ttf_font_path())) {
+    if (s_text && !s_formatted && strcmp(s_font_path, ttf_font_path())) {
         size_t off = book_layout_page_start_offset(s_page);
         save_progress();
         lock_draw();
         invalidate_prep();
-        bool ok = book_layout_build_blocks(s_text, s_text_len, s_blocks, s_block_count, body_rect(), s_px);
+        bool ok = layout_build_active(s_text, s_text_len, s_blocks, s_block_count, body_rect(), s_px);
         if (ok) s_page = book_layout_page_for_offset(off);
-        copy_text(s_font_path, sizeof(s_font_path), ttf_font_path());
+        copy_text(s_font_path, sizeof(s_font_path), s_formatted ? s_active_format.font.path : ttf_font_path());
         unlock_draw();
         if (!ok) { free_book(); s_view = SHELF; copy_text(s_message, sizeof(s_message), "字体重排失败，请重新打开图书"); }
         return APP_REDRAW_PAGE;
@@ -1831,7 +1849,7 @@ static app_redraw_t on_tick(app_ctx_t* ctx) {
         !s_toolbar && !(ctx->touch && ctx->touch->touched)) {
         lock_draw();
         invalidate_prep();
-        bool ok = book_layout_extend(2);
+        bool ok = layout_extend_active(2);
         unlock_draw();
         if (!ok) {
             free_book(); s_view = SHELF; ctx->leaf = 0;
@@ -1905,9 +1923,11 @@ bool folio_reader_prepare_sleep(bool eco) {
     save_progress();
     bool progress_ok = !s_save_failed;
     bool stats_ok = folio_reading_checkpoint();
-    bool draft_ok = checkpoint_draft();
-    s_blocked_reason = "";
-    if (eco && draft_ok) {
+    bool full_session=folio_format_has_session();
+    bool format_ok=folio_format_prepare_sleep(eco);
+    bool draft_ok=format_ok&&(full_session||checkpoint_draft());
+    s_blocked_reason=!format_ok?folio_format_error():"";
+    if (eco && draft_ok && !full_session) {
         folio_draft_sleep_action_t action = folio_reader_draft_sleep_policy(
             s_draft.editing, s_reader_active, s_view == READING && s_text != NULL);
         if (action == FOLIO_DRAFT_SLEEP_BLOCK) {
@@ -1932,7 +1952,7 @@ bool folio_reader_prepare_sleep(bool eco) {
     return progress_ok && stats_ok && draft_ok;
 }
 folio_reader_save_status_t folio_reader_save_status(void) { return s_sleep_status; }
-bool folio_reader_has_unapplied_draft(void) { return s_draft.editing; }
+bool folio_reader_has_unapplied_draft(void) { return folio_format_has_session()||s_draft.editing; }
 const char* folio_reader_blocked_reason(void) { return s_blocked_reason; }
 static bool return_to_draft(app_ctx_t* ctx, const folio_reader_draft_t* draft) {
     if (!ctx || !draft || !draft->editing) { s_blocked_reason = "没有可返回的排版会话"; return false; }
@@ -1962,6 +1982,7 @@ static bool return_to_draft(app_ctx_t* ctx, const folio_reader_draft_t* draft) {
     return true;
 }
 bool folio_reader_return_to_editor(app_ctx_t* ctx) {
+    if(folio_format_has_session())return folio_format_return_to_editor(ctx);
     folio_reader_draft_t live;
     if (!s_draft.editing || !folio_reader_draft_recovery_candidate(FOLIO_STATE_DIRECTORY, &s_draft, &live)) {
         s_blocked_reason = "当前 RAM 排版会话无法恢复，草稿已保留";
@@ -1970,20 +1991,34 @@ bool folio_reader_return_to_editor(app_ctx_t* ctx) {
     return return_to_draft(ctx, &live);
 }
 bool folio_reader_has_suspended_draft(void) {
-    folio_reader_draft_t stored;
-    return folio_reader_draft_resume(FOLIO_STATE_DIRECTORY, &stored);
+    if(folio_format_has_session())return true;
+    folio_format_snapshot_t full;
+    if(folio_format_store_recover_pending(FOLIO_STATE_DIRECTORY,&full)==FOLIO_CHECKPOINT_OK||
+       folio_format_store_resume(FOLIO_STATE_DIRECTORY,&full)==FOLIO_CHECKPOINT_OK)return true;
+    folio_reader_draft_t stored;if(!folio_reader_draft_resume(FOLIO_STATE_DIRECTORY,&stored))return false;
+    folio_checkpoint_result_t migrated=folio_format_store_load(FOLIO_STATE_DIRECTORY,FORMAT_BOOK,stored.path,&full);
+    if(migrated==FOLIO_CHECKPOINT_OK)return full.lifecycle==FORMAT_EDITING;
+    return migrated==FOLIO_CHECKPOINT_MISSING;
 }
 bool app_book_restore_suspended(app_ctx_t* ctx) {
+    if(folio_format_has_session())return folio_format_return_to_editor(ctx);
+    const app_desc_t* full=folio_format_restore_boot();
+    if(full&&ctx){ctx->request_app=full;return true;}
     folio_reader_draft_t restored;
     if (!ctx || !folio_reader_draft_recovery_candidate(FOLIO_STATE_DIRECTORY, &s_draft, &restored)) {
         s_blocked_reason = "没有匹配的排版恢复记录，原记录已保留";
         return false;
     }
+    folio_format_snapshot_t migrated;
+    folio_checkpoint_result_t result=folio_format_store_load(FOLIO_STATE_DIRECTORY,FORMAT_BOOK,restored.path,&migrated);
+    if(result==FOLIO_CHECKPOINT_OK)return folio_format_restore_book_session(ctx,restored.path);
+    if(result!=FOLIO_CHECKPOINT_MISSING){s_blocked_reason="新排版记录不可读取，未回退覆盖旧来源";return false;}
     return return_to_draft(ctx, &restored);
 }
 bool folio_reader_storage_reinitialized(void) {
     lock_draw(); free_book(); unlock_draw();
     folio_reading_deinit();
+    folio_format_reset_runtime();
     memset(&s_draft, 0, sizeof(s_draft));
     s_draft_pending = s_draft_failed = false;
     s_blocked_reason = "";
@@ -2002,6 +2037,7 @@ bool folio_reader_retry_storage(void) {
     return !s_stats_failed && draft_ok;
 }
 void folio_reader_wake(void) {
+    folio_format_wake();
     s_sleeping = false;
     int64_t now = esp_timer_get_time() / 1000;
     folio_reading_activity(now);
@@ -2017,8 +2053,119 @@ void folio_reader_set_visible(bool visible) {
         visible && !s_sleeping && s_view == READING && s_text && !s_toolbar);
 }
 
+void folio_reader_format_media_lost(void) {
+    // 先取得 draw_lock，确保预渲染已退出字体作用域；不在字体锁内等待读者锁。
+    // Acquire draw_lock after preparation leaves its font scope; never wait for reader lock while holding a font lock.
+    lock_draw();invalidate_prep();
+    if(s_prep_task){vTaskDelete(s_prep_task);s_prep_task=NULL;}
+    book_layout_discard_format(s_format_layout);s_format_layout=NULL;
+    save_progress();free_book();
+    free(s_next_fb);s_next_fb=NULL;
+    if(s_prep_done){vSemaphoreDelete(s_prep_done);s_prep_done=NULL;}
+    s_format_retained=false;s_view=SHELF;
+    unlock_draw();
+}
+void folio_reader_format_retain(bool retain) { s_format_retained=retain; }
+bool folio_reader_format_resume_resources(void) {
+    if(!s_text||!s_formatted)return false;
+    lock_draw();struct stat book;pending_progress_t* progress=pending_find(s_path);
+    if(!book_layout_page_count()){s_blocked_reason="当前字体无法显示正文，请选择完整字体后重试";unlock_draw();return false;}
+    if(stat(s_path,&book)||!S_ISREG(book.st_mode)||(uint64_t)book.st_size!=s_file_size||book.st_mtime!=s_book_mtime||
+       (progress&&book_progress_watch_invalidated(progress->watch))){
+        s_blocked_reason="原图书缺失或已替换，未恢复旧页码或写回进度";unlock_draw();return false;
+    }
+    ttf_font_identity_t identity;
+    bool same=ttf_font_identity_read(s_active_format.font.path,&identity)==ESP_OK&&
+        identity.file_size==s_active_format.font.file_size&&identity.mtime==s_active_format.font.mtime&&
+        identity.header_crc==s_active_format.font.header_crc;
+    if(!same){s_blocked_reason="原正文字体缺失或已替换，请恢复原资源后重试";unlock_draw();return false;}
+    bool ready=ttf_font_prepare(TTF_ROLE_READER,s_active_format.font.path)==ESP_OK;
+    if(ready){ttf_font_scope_t reader;ready=ttf_font_begin(TTF_ROLE_READER,&reader)==ESP_OK;
+        if(ready){ttf_set_weight(folio_format_weight_number(&s_active_format));ttf_font_end(&reader);}}
+    if(!ready)s_blocked_reason="原正文字体暂不可用，请检查存储后重试";
+    unlock_draw();return ready;
+}
+bool folio_reader_format_capture(folio_format_snapshot_t* out) {
+    if(!out||!s_text||!s_path[0]||!s_formatted)return false;
+    struct stat st;if(stat(s_path,&st)||!S_ISREG(st.st_mode)||(uint64_t)st.st_size!=s_file_size)return false;
+    memset(out,0,sizeof(*out));out->scope=FORMAT_BOOK;out->lifecycle=FORMAT_CLOSED;out->route=FORMAT_ROUTE_READER;
+    copy_text(out->book_path,sizeof(out->book_path),s_path);copy_text(out->book_title,sizeof(out->book_title),s_book_title);
+    out->book_size=s_file_size;out->book_mtime=st.st_mtime;out->active_revision=s_active_format_revision;
+    out->active=out->root=out->field_entry=out->candidate=s_active_format;out->font_transfer_stopped=true;
+    out->transient_baseline=folio_format_read_baseline_pending(s_path);
+    return true;
+}
+void folio_reader_format_abort(void) {
+    lock_draw();book_layout_discard_format(s_format_layout);s_format_layout=NULL;
+    ttf_font_discard_preview();unlock_draw();
+}
+static bool load_book_for_format(app_ctx_t* ctx,const folio_format_snapshot_t* session) {
+    struct stat st;
+    if(!ctx||stat(session->book_path,&st)||!S_ISREG(st.st_mode)||(uint64_t)st.st_size!=session->book_size||st.st_mtime!=session->book_mtime)return false;
+    if(!pending_reserve(session->book_path))return false;
+    save_progress();free_book();
+    loading_detail(ctx,"正在准备原图书…","只加载内容，确认应用前不改变排版");
+    if(book_open(session->book_path)!=ESP_OK)return false;
+    book_progress_t progress={0};bool resumed=book_progress_load(session->book_path,(uint32_t)session->book_size,&progress);
+    size_t chapter=resumed&&progress.chapter<book_chapter_count()?progress.chapter:0;
+    html_text_t loaded={0};if(book_chapter_load_blocks(chapter,&loaded)!=ESP_OK){book_close();return false;}
+    copy_text(s_path,sizeof(s_path),session->book_path);s_file_size=session->book_size;s_book_mtime=session->book_mtime;
+    s_text=loaded.utf8;s_text_len=loaded.len;s_blocks=loaded.blocks;s_block_count=loaded.count;s_chapter=chapter;s_page=0;
+    s_active_format=session->active;s_active_format_revision=session->active_revision;s_px=session->active.px;s_formatted=true;
+    s_format_anchor=resumed&&chapter==progress.chapter?progress.byte_off:0;
+    copy_text(s_book_title,sizeof(s_book_title),session->book_title);
+    if(book_chapter_title(chapter,s_title,sizeof(s_title))!=ESP_OK)copy_text(s_title,sizeof(s_title),"阅读");
+    s_view=READING;s_format_retained=true;ensure_prep();return true;
+}
+bool folio_reader_format_prepare(app_ctx_t* ctx,const folio_format_values_t* values,folio_format_scope_t scope) {
+    s_blocked_reason="候选排版准备失败，原排版和草稿保留";
+    if(!values||!folio_format_values_valid(values))return false;
+    const folio_format_snapshot_t* session=folio_format_snapshot();
+    if(scope==FORMAT_BOOK&&(!s_text||strcmp(s_path,session->book_path))){
+        if(!load_book_for_format(ctx,session))return false;
+        s_format_retained=true;
+    }
+    lock_draw();book_layout_discard_format(s_format_layout);s_format_layout=NULL;invalidate_prep();
+    if(ttf_font_prepare(TTF_ROLE_PREVIEW,values->font.path)!=ESP_OK){unlock_draw();return false;}
+    ttf_font_scope_t preview;if(ttf_font_begin(TTF_ROLE_PREVIEW,&preview)!=ESP_OK){unlock_draw();return false;}
+    int weight=folio_format_weight_number(values),minimum=400,maximum=400;
+    bool variable=ttf_font_weight_range(&minimum,&maximum);
+    bool supported=(weight==400&&!variable)||(variable&&weight>=minimum&&weight<=maximum);
+    if(!supported)s_blocked_reason="候选字体不支持目标字重，请调整字重";
+    if(supported&&ttf_font_pixel_height_for_em(values->px)>0){
+        ttf_set_weight(weight);s_prepared_format=*values;
+        if(scope==FORMAT_BOOK){
+            if(book_layout_page_count())s_format_anchor=book_layout_page_start_offset(s_page);
+            s_format_layout=book_layout_prepare_format(s_text,s_text_len,s_blocks,s_block_count,format_body_rect(values),values,s_format_anchor);
+            supported=s_format_layout!=NULL;
+            if(!supported){book_layout_error_t error=book_layout_last_error(NULL);s_blocked_reason=error==BOOK_LAYOUT_ERROR_GLYPH?"候选字体缺少正文字形，请选择完整字体":error==BOOK_LAYOUT_ERROR_FONT_RESOURCE?"候选字体资源不可读，请检查存储":error==BOOK_LAYOUT_ERROR_MEMORY?"候选排版内存不足，原页面与草稿保留":"候选正文无法排版，原页面与草稿保留";}
+        }
+    }else supported=false;
+    ttf_font_end(&preview);if(!supported)ttf_font_discard_preview();unlock_draw();return supported;
+}
+const char* folio_reader_format_prepare_error(void){return s_blocked_reason;}
+bool folio_reader_format_commit(const folio_format_values_t* values,uint64_t revision,folio_format_scope_t scope) {
+    if(!values||!folio_format_values_equal(values,&s_prepared_format))return false;
+    if(scope==FORMAT_DEFAULTS){ttf_font_discard_preview();return true;}
+    lock_draw();
+    if(!s_format_layout||ttf_font_apply_preview()!=ESP_OK){unlock_draw();return false;}
+    if(!book_layout_commit_format(s_format_layout)){(void)ttf_font_apply_preview();unlock_draw();return false;}
+    s_format_layout=NULL;s_active_format=*values;s_active_format_revision=revision;s_formatted=true;s_px=values->px;
+    s_page=book_layout_page_for_offset(s_format_anchor);s_toolbar=false;invalidate_prep();
+    copy_text(s_font_path,sizeof(s_font_path),values->font.path);
+    ttf_font_discard_preview();unlock_draw();save_progress();return true;
+}
+void folio_reader_format_return(app_ctx_t* ctx,folio_format_scope_t scope) {
+    if(!ctx)return;
+    if(!folio_format_has_session()){folio_reader_draft_cancel(&s_draft);s_draft_pending=s_draft_failed=false;}
+    if(scope==FORMAT_DEFAULTS){extern const app_desc_t app_folio_settings;ctx->request_app=&app_folio_settings;return;}
+    const folio_format_snapshot_t* state=folio_format_snapshot();
+    if(s_text&&!strcmp(s_path,state->book_path)){(void)folio_reader_format_resume_resources();s_format_retained=true;s_entry=ENTRY_DEFAULT;ctx->request_app=&app_book;}
+    else app_book_open_path(ctx,state->book_path);
+}
+
 const app_desc_t app_book = {
-    .title = "图书 Books", .detail = "TF 卡 txt / epub 阅读", .enter_full = true, .owns_keys = true,
+    .title = "图书 Books", .detail = "TF 卡 txt / epub 阅读", .enter_full = true, .owns_keys = true, .owns_footer = true, .manages_font = true,
     .render = render, .present = present, .on_enter = on_enter, .on_exit = book_on_exit,
     .on_media_lost = book_on_media_lost, .on_visibility = book_on_visibility,
     .on_gesture = gesture_event, .on_key = on_key, .on_key_long = on_key_long,

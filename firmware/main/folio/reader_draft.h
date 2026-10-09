@@ -10,8 +10,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "reading_service.h"
+#include "format_model.h"
+#include "checkpoint_store.h"
 
-typedef enum { FOLIO_FORMAT_BOOK = 1, FOLIO_FORMAT_DEFAULTS = 2 } folio_format_scope_t;
 typedef enum { FOLIO_RESUME_READER = 1, FOLIO_RESUME_EDITOR = 2 } folio_format_origin_t;
 #define FOLIO_FORMAT_FIELD_SIZE 1U
 #define FOLIO_FORMAT_RETURN_DEPTH 8
@@ -40,6 +41,8 @@ typedef struct {
 /// 每本书独立封装已应用值和未应用草稿；关闭草稿与偏好提交共享一次 ACK。
 /// Per-book envelope joins active values and unapplied draft; closure and preference commit share one ACK.
 bool folio_reader_draft_load(const char* directory, const char* path, folio_reader_draft_t* out);
+/// 迁移需区分不存在与损坏/未知版本，不能把后两者当空记录覆盖。/ Migration distinguishes missing from corrupt/unknown schemas; never overwrite the latter as empty.
+folio_checkpoint_result_t folio_reader_draft_load_result(const char* directory,const char* path,folio_reader_draft_t* out);
 bool folio_reader_draft_save(const char* directory, const folio_reader_draft_t* draft);
 void folio_reader_draft_begin(folio_reader_draft_t* draft, const char* path, uint32_t size, int applied_px);
 bool folio_reader_draft_adjust(folio_reader_draft_t* draft, int direction);

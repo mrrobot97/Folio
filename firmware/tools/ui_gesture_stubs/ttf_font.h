@@ -6,6 +6,11 @@
 #pragma once
 #include <stdbool.h>
 #include "epdiy.h"
+#define ESP_OK 0
+typedef struct { bool locked; } ttf_font_scope_t;
+#define TTF_ROLE_UI 0
+static inline int ttf_font_begin(int role, ttf_font_scope_t* scope) { (void)role; scope->locked=true; return 0; }
+static inline void ttf_font_end(ttf_font_scope_t* scope) { scope->locked=false; }
 bool ttf_font_ready(void);
 int ttf_ascender_px(int px);
 void ttf_measure_line_px(int px, const char *text, int *above, int *below);

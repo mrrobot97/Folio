@@ -88,6 +88,9 @@ typedef struct {
     /// Consumed by the shared power flow at tick end, power-off first; pages never drop EN directly.
     bool request_sleep;
     bool request_poweroff;
+    /// 退出编辑后切到安全来源页再打开菜单，并清除已退出页的临时返回记录。
+    /// Leave an editor, select a safe source page, then open its menu without retaining the closed editor as history.
+    bool request_menu_after_switch;
 } app_ctx_t;
 
 struct app_desc_s {
@@ -105,12 +108,21 @@ struct app_desc_s {
     bool owns_keys;
     /// 产品页接管底栏热区；三键菜单出口仍由 owns_keys 页提供。/ Product page owns footer hit targets, retaining its key menu exit.
     bool owns_footer;
+    /// 页面自行管理正文/候选字体，禁止旧全局设置的自动重载覆盖它。
+    /// Page owns body/candidate fonts; legacy preference retries must not override them.
+    bool manages_font;
     /// 进页/离页。on_enter 里做上电、唤醒传感器、拉一次数据这类副作用。
     /// / Enter/exit. on_enter powers up, wakes sensors, takes a first sample.
     void (*on_enter)(app_ctx_t* ctx);
     void (*on_exit)(app_ctx_t* ctx);
     /// 菜单/睡眠遮挡时暂停可见性相关任务，不绘制。/ Pause visibility-dependent work behind menus/sleep, without drawing.
     void (*on_visibility)(app_ctx_t* ctx, bool visible);
+    /// 仅正常浅睡唤醒后调用，可请求安全恢复页面；取消睡眠不调用。
+    /// Called only after a real light-sleep wake; may request a safe return page, never called on cancellation.
+    void (*on_wake)(app_ctx_t* ctx);
+    /// 可选诊断场景，只读状态、无 I/O；返回 folio_metrics_scenario_t 的值。
+    /// Optional diagnostic scenario, querying state without I/O; returns a folio_metrics_scenario_t value.
+    int (*metrics_scenario)(void);
     /// TF 挂载失效：停止并等待后台任务、关闭文件；主循环随后回退字体并重绘，菜单打开时也通知。
     /// On TF mount loss, join background work and close files before font fallback/redraw; also called behind menus.
     void (*on_media_lost)(app_ctx_t* ctx);

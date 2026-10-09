@@ -3,6 +3,15 @@
 按日期和作者简述对用户可见的功能变化；详细实现历史见 Git。使用方法见 [README](../README.zh-CN.md)。
 User-visible changes by date and author; Git retains implementation history. See [README](../README.md) for usage.
 
+## 2026-10-09 · Folio 0.2.0 开发节点 / Development checkpoint
+
+- 增加本书/新书默认排版草稿、多字段预览及统一应用；UI、正文、预览字体隔离，保留真实可变字重和缺资源提示。
+  Add book/default format drafts, multi-field previews and explicit application; isolate UI, reader and preview fonts with variable weights and missing-resource feedback.
+- 使用意图记录协调应用、放弃、睡眠及冷恢复；迁移旧字号单位，等长 v3 进度标记排版来源，配额/空间不足时保留可恢复状态。
+  Coordinate apply, discard, sleep and cold recovery through intent records; migrate legacy size units and tag format origins in same-size v3 progress, retaining recoverable state on quota/space failures.
+- 字体上传子流程限定为字体；增加默认关闭的本地性能观测。仍未完成全部设计画板、OTA 产品闭环或真机验证；后续范围见仓库根 docs/NEXT_STEPS.md。
+  Restrict the font-upload child flow to fonts and add disabled-by-default local metrics. Full design coverage, product OTA flow and hardware validation remain incomplete; see root docs/NEXT_STEPS.md.
+
 ## 2026-10-09 · Folio 0.1.0 开发节点 / Development checkpoint
 
 - 基于官方固定提交接入产品首页、离线统计/月历/分书详情、手动日期与壁纸选择；稳定设计参考 v0.4.2，完整覆盖见仓库根 docs/PRODUCT_UI.md。

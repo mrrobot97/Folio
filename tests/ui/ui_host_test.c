@@ -10,6 +10,7 @@
 #include "folio_navigation.h"
 #include "reading_service.h"
 #include "reader_runtime.h"
+#include "format_service.h"
 #include "book_store.h"
 #include "settings.h"
 #include "read_pico_pmu.h"
@@ -19,11 +20,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#ifndef FOLIO_UI_REAL_FONT
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
+#endif
 #define W 684
 #define H 1216
+#ifndef FOLIO_UI_REAL_FONT
 static stbtt_fontinfo font;
+#endif
 static uint8_t fb[W*H],before[W*H];
 static folio_reading_summary_t summary;
 static int32_t snapshot_day, last_book_day;
@@ -35,7 +40,7 @@ static EpdRect updates[8];
 static size_t update_count;
 int E0470_WAVEFORM;
 const app_desc_t app_transfer={0},app_font_pick={0},app_sleep={0},app_sd={0},app_home={0},app_folio_wallpaper={0},app_folio_datetime={0};
-void epd_draw_pixel(int x,int y,uint8_t c,uint8_t*f){if(x>=0&&x<W&&y>=0&&y<H)f[y*W+x]=c;}
+void epd_draw_pixel(int x,int y,uint8_t c,uint8_t*f){if(x>=0&&x<W&&y>=0&&y<H)f[y*W+x]=(uint8_t)((c>>4)*17);}
 void epd_fill_rect(EpdRect r,uint8_t c,uint8_t*f){for(int y=r.y;y<r.y+r.height;y++)for(int x=r.x;x<r.x+r.width;x++)epd_draw_pixel(x,y,c,f);}
 void epd_draw_line(int x,int y,int xx,int yy,uint8_t c,uint8_t*f){int dx=abs(xx-x),sx=x<xx?1:-1,dy=-abs(yy-y),sy=y<yy?1:-1,err=dx+dy;for(;;){epd_draw_pixel(x,y,c,f);if(x==xx&&y==yy)break;int e=2*err;if(e>=dy){err+=dy;x+=sx;}if(e<=dx){err+=dx;y+=sy;}}}
 void epd_draw_circle(int x,int y,int r,uint8_t c,uint8_t*f){for(int a=0;a<720;a++){double theta=a*3.141592653589793/360;epd_draw_pixel(x+(int)round(r*cos(theta)),y+(int)round(r*sin(theta)),c,f);}}
@@ -49,10 +54,24 @@ EpdRect ui_rotate_rect_to_fb(EpdRect r){return r;}
 EpdRect ui_rect_union(EpdRect a,EpdRect b){int x=a.x<b.x?a.x:b.x,y=a.y<b.y?a.y:b.y,right=a.x+a.width>b.x+b.width?a.x+a.width:b.x+b.width,bottom=a.y+a.height>b.y+b.height?a.y+a.height:b.y+b.height;return(EpdRect){x,y,right-x,bottom-y};}
 bool ui_rect_hit(EpdRect r,uint16_t x,uint16_t y){return x>=r.x&&x<r.x+r.width&&y>=r.y&&y<r.y+r.height;}
 void ui_hairline(uint8_t*f,int y,int x,int w,uint8_t c){epd_fill_rect((EpdRect){x,y,w,1},c,f);}
+#ifndef FOLIO_UI_REAL_FONT
 static int utf8(const char**p){const unsigned char*s=(const unsigned char*)*p;int c=*s++,n=0;if(c>=0xF0){c&=7;n=3;}else if(c>=0xE0){c&=15;n=2;}else if(c>=0xC0){c&=31;n=1;}while(n--&&*s)c=(c<<6)|(*s++&63);*p=(const char*)s;return c;}
 int ttf_ascender_px(int px){int a;stbtt_GetFontVMetrics(&font,&a,NULL,NULL);return (int)round(a*stbtt_ScaleForPixelHeight(&font,px));}
 int ttf_text_width_px(int px,const char*s){float scale=stbtt_ScaleForPixelHeight(&font,px),width=0;while(*s){int c=utf8(&s),a;stbtt_GetCodepointHMetrics(&font,c,&a,NULL);width+=a*scale;}return (int)ceil(width);}
 void ttf_draw_text_px(uint8_t*f,int x,int y,int px,const char*s,enum EpdFontFlags align,uint8_t ink,uint8_t paper){int width=ttf_text_width_px(px,s);if(align==EPD_DRAW_ALIGN_CENTER)x-=width/2;if(align==EPD_DRAW_ALIGN_RIGHT)x-=width;float scale=stbtt_ScaleForPixelHeight(&font,px),pos=(float)x;while(*s){int c=utf8(&s),w,h,xx,yy,a;unsigned char*glyph=stbtt_GetCodepointBitmap(&font,0,scale,c,&w,&h,&xx,&yy);stbtt_GetCodepointHMetrics(&font,c,&a,NULL);for(int j=0;j<h;j++)for(int i=0;i<w;i++){unsigned alpha=glyph[j*w+i];if(alpha){unsigned c8=(ink*17*alpha+paper*17*(255-alpha))/255;epd_draw_pixel((int)pos+xx+i,y+yy+j,(uint8_t)c8,f);}}stbtt_FreeBitmap(glyph,NULL);pos+=a*scale;}}
+static ttf_font_role_t host_role=TTF_ROLE_READER;
+static int host_weight=400;
+esp_err_t ttf_font_begin(ttf_font_role_t role,ttf_font_scope_t*scope){scope->previous=host_role;scope->locked=true;host_role=role;return ESP_OK;}
+void ttf_font_end(ttf_font_scope_t*scope){host_role=scope->previous;scope->locked=false;}
+void ttf_set_weight(int weight){host_weight=weight;}
+int ttf_get_weight(void){return host_weight;}
+int ttf_font_pixel_height_for_em(int em){float scale=stbtt_ScaleForMappingEmToPixels(&font,em);float native=stbtt_ScaleForPixelHeight(&font,1.0f);return (int)roundf(scale/native);}
+const app_desc_t app_folio_format={0},app_folio_font_picker={0};
+bool folio_format_begin_defaults(app_ctx_t*ctx){ctx->request_app=&app_folio_format;nav=5;return true;}
+bool folio_format_field_begin(folio_format_field_t field){(void)field;return true;}
+const char*folio_format_error(void){return "";}
+bool folio_format_enter_font_child(bool transfer){(void)transfer;return true;}
+#endif
 bool folio_clock_local(int*y,int*m,int*d,int*h,int*mi){if(!summary.today_day)return false;*y=summary.today_day/10000;*m=summary.today_day/100%100;*d=summary.today_day%100;*h=9;*mi=41;return true;}
 const pmu_snapshot_t*read_pico_pmu_get(void){static pmu_snapshot_t p={true,760};io_reads++;return &p;}
 esp_err_t read_pico_sd_get_info(read_pico_sd_info_t*s){s->mounted=true;io_reads++;return ESP_OK;}
@@ -86,8 +105,9 @@ void app_settings_set_sleep_mode(app_sleep_mode_t mode){if(!setting_failure)slee
 app_sleep_mode_t app_settings_sleep_mode(void){return sleep_mode;}
 enum EpdDrawError update_display_area_with(EpdiyHighlevelState*h,const void*w,enum EpdDrawMode m,EpdRect r){(void)h;(void)w;assert(m==MODE_GL16);assert(update_count<8);updates[update_count++]=r;return EPD_DRAW_SUCCESS;}
 void guard_draw_result(EpdiyHighlevelState*h,enum EpdDrawError e){(void)h;assert(e==EPD_DRAW_SUCCESS);}
-static app_redraw_t tap(const app_desc_t*a,app_ctx_t*c,int x,int y){ui_gesture_event_t e={.type=UI_GESTURE_TAP,.x0=x,.y0=y,.x=x,.y=y};return a->on_gesture(c,&e);}
+static app_redraw_t tap(const app_desc_t*a,app_ctx_t*c,int x,int y){c->request_app=NULL;c->request_menu=false;c->request_return=false;c->request_menu_after_switch=false;c->request_sleep=false;c->request_poweroff=false;ui_gesture_event_t e={.type=UI_GESTURE_TAP,.x0=x,.y0=y,.x=x,.y=y};return a->on_gesture(c,&e);}
 static void draw(const app_desc_t*a,app_ctx_t*c,const char*dir,const char*name){int reads=io_reads;a->render(c,fb);assert(io_reads==reads);char path[512];snprintf(path,sizeof(path),"%s/%s.pgm",dir,name);FILE*f=fopen(path,"wb");assert(f);fprintf(f,"P5\n%d %d\n255\n",W,H);assert(fwrite(fb,1,sizeof(fb),f)==sizeof(fb));fclose(f);}
+#ifndef FOLIO_UI_REAL_FONT
 int main(int argc,char**argv){
     assert(argc==3);FILE*f=fopen(argv[1],"rb");assert(f);fseek(f,0,SEEK_END);long len=ftell(f);rewind(f);unsigned char*font_data=malloc((size_t)len);assert(font_data&&fread(font_data,1,(size_t)len,f)==(size_t)len);fclose(f);assert(stbtt_InitFont(&font,font_data,0));
     assert(folio_ui_calendar_offset(2026,10)==3);assert(folio_ui_month_days(2024,2)==29);assert(folio_ui_month_days(2100,2)==28);assert(folio_ui_previous_day(20260101)==20251231);
@@ -103,7 +123,7 @@ int main(int argc,char**argv){
     memcpy(before,fb,sizeof(fb));draw(&app_folio_stats,&ctx,argv[2],"stats-calendar-selected");assert(!memcmp(before,fb,sizeof(fb)));assert(tap(&app_folio_stats,&ctx,534,544)==APP_REDRAW_NONE);tap(&app_folio_stats,&ctx,300,1044);draw(&app_folio_stats,&ctx,argv[2],"stats-day");tap(&app_folio_stats,&ctx,55,125);draw(&app_folio_stats,&ctx,argv[2],"stats-calendar-return");assert(tap(&app_folio_stats,&ctx,342,544)==APP_REDRAW_NONE);
     tap(&app_folio_stats,&ctx,342,224);draw(&app_folio_stats,&ctx,argv[2],"stats-month-picker");tap(&app_folio_stats,&ctx,55,125);
     tap(&app_folio_stats,&ctx,55,125);tap(&app_folio_stats,&ctx,450,260);draw(&app_folio_stats,&ctx,argv[2],"stats-books");tap(&app_folio_stats,&ctx,100,450);draw(&app_folio_stats,&ctx,argv[2],"stats-book-detail");
-    app_folio_settings.on_enter(&ctx);draw(&app_folio_settings,&ctx,argv[2],"settings");tap(&app_folio_settings,&ctx,200,445);draw(&app_folio_settings,&ctx,argv[2],"settings-reading");tap(&app_folio_settings,&ctx,550,460);assert(setting_px==52);
+    app_folio_settings.on_enter(&ctx);draw(&app_folio_settings,&ctx,argv[2],"settings");tap(&app_folio_settings,&ctx,200,445);draw(&app_folio_settings,&ctx,argv[2],"settings-reading");tap(&app_folio_settings,&ctx,200,260);assert(nav==5&&setting_px==48);
     ctx.now_ms=23000;app_folio_home.on_enter(&ctx);assert(last_snapshot_ms==23000);
     snapshot_day=20261010;ctx.now_ms=24000;assert(app_folio_home.on_tick(&ctx)==APP_REDRAW_PAGE);
     ctx.now_ms=24001;assert(app_folio_home.on_tick(&ctx)==APP_REDRAW_NONE);
@@ -133,3 +153,5 @@ int main(int argc,char**argv){
     flash_ready=false;app_folio_storage.on_enter(&ctx);tap(&app_folio_storage,&ctx,200,756);tap(&app_folio_storage,&ctx,200,982);flash_ready=true;tap(&app_folio_storage,&ctx,200,982);assert(format_calls==1);
     free(font_data);puts("PASS: production rendering purity, real routes, leap/year calendar bounds and gray-region containment.");return 0;
 }
+
+#endif

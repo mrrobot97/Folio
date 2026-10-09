@@ -52,28 +52,36 @@ void ui_text(
     uint8_t* framebuffer, int x, int y_top, int px, const char* text,
     enum EpdFontFlags align, bool inverted
 ) {
+    ttf_font_scope_t scope;
+    if (ttf_font_begin(TTF_ROLE_UI, &scope) != ESP_OK) return;
     ttf_draw_text_px(
         framebuffer, x, y_top + ttf_ascender_px(px), px, text, align,
         inverted ? UI_INK_WHITE : UI_INK_BLACK,
         inverted ? UI_INK_BLACK : UI_INK_WHITE
     );
+    ttf_font_end(&scope);
 }
 
 void ui_text_bw(
     uint8_t* framebuffer, int x, int y_top, int px, const char* text,
     enum EpdFontFlags align, bool inverted
 ) {
+    ttf_font_scope_t scope;
+    if (ttf_font_begin(TTF_ROLE_UI, &scope) != ESP_OK) return;
     ttf_draw_text_px_bw(
         framebuffer, x, y_top + ttf_ascender_px(px), px, text, align,
         inverted ? UI_INK_WHITE : UI_INK_BLACK,
         inverted ? UI_INK_BLACK : UI_INK_WHITE
     );
+    ttf_font_end(&scope);
 }
 
 void ui_text_vc(
     uint8_t* framebuffer, int x, int center_y, int px, const char* text,
     enum EpdFontFlags align, bool inverted
 ) {
+    ttf_font_scope_t scope;
+    if (ttf_font_begin(TTF_ROLE_UI, &scope) != ESP_OK) return;
     int above = 0;
     int below = 0;
     ttf_measure_line_px(px, text, &above, &below);
@@ -82,6 +90,7 @@ void ui_text_vc(
         inverted ? UI_INK_WHITE : UI_INK_BLACK,
         inverted ? UI_INK_BLACK : UI_INK_WHITE
     );
+    ttf_font_end(&scope);
 }
 
 void ui_blit_bmp(
@@ -323,17 +332,21 @@ void ui_hairline(uint8_t* framebuffer, int y, int x, int w, uint8_t color) {
 }
 
 static void header_ink_span(int y_top, int px, const char* text, int* top, int* bot) {
+    ttf_font_scope_t scope;
+    bool ready = ttf_font_begin(TTF_ROLE_UI, &scope) == ESP_OK;
     int above = 0;
     int below = 0;
-    if (ttf_font_ready() && text != NULL && text[0] != '\0') {
+    if (ready && text != NULL && text[0] != '\0') {
         ttf_measure_line_px(px, text, &above, &below);
         const int base = y_top + ttf_ascender_px(px);
         *top = base - above;
         *bot = base + below;
+        ttf_font_end(&scope);
         return;
     }
     *top = y_top;
     *bot = y_top + px;
+    if (ready) ttf_font_end(&scope);
 }
 
 ui_header_skel_t ui_header_skel_box(

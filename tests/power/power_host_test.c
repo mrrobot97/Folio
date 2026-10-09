@@ -58,7 +58,7 @@ static void record(const char *text){size_t n=strlen(drawn_text),k=strlen(text);
 static void run_request(bool poweroff){
     EpdiyHighlevelState hl={0};request_ctx=(app_ctx_t){.hl=&hl,.fb=framebuffer,.tp=(void*)1};int64_t ignored=0;
     jump_armed=true;
-    if(setjmp(power_cut)==0)folio_power_request(&request_ctx,poweroff,&ignored);
+    if(setjmp(power_cut)==0)folio_power_request(&request_ctx,NULL,poweroff,&ignored);
     jump_armed=false;
 }
 static void finish(void){checks++;printf("%s: saves=%d lock=%d fast=%d PMU-eco=%d PMU-off=%d wake=%d\n",case_name,prepare_calls,lock_frames,light_sleeps,pmu_eco,pmu_off,wake_calls);}
@@ -69,6 +69,8 @@ bool folio_reader_prepare_sleep(bool eco){
 }
 folio_reader_save_status_t folio_reader_save_status(void){return save_status;}
 void folio_reader_wake(void){wake_calls++;}
+void app_transfer_power_stopped(void){}
+void folio_format_capture_power_origin(const app_desc_t* origin){(void)origin;}
 bool folio_reader_has_unapplied_draft(void){return has_draft;}
 bool folio_reader_return_to_editor(app_ctx_t*ctx){
     bool ok=editor_calls<editor_plan_count?editor_plan[editor_calls]:true;editor_calls++;

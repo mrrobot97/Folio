@@ -8,6 +8,9 @@
  * Variable TTF: sector I/O from the card; glyf/gvar map into PSRAM when
  * they fit. Glyphs are cached by codepoint, size and weight. The built-in
  * font is a ChillDuanSans subset.
+ *
+ * Folio：UI/正文/候选分别持有上下文；共享递归绘制锁与 1.5 MiB 字形预算。
+ * Folio: isolated UI/reader/candidate contexts with one recursive lock and a 1.5 MiB glyph budget.
  */
 
 #include "ttf_font.h"
@@ -20,12 +23,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "settings.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 static void* ttf_malloc(size_t size, void* userdata) {
     (void)userdata;
@@ -123,57 +129,8 @@ typedef struct {
 // several milliseconds. 32×4KB PSRAM slots keep recent sectors. Before a
 // line is drawn, needed blocks are sorted and merged. If glyf/gvar fit,
 // they are streamed into PSRAM at open so a cold start does not touch the card.
-static int font_fd = -1;
-static const uint8_t* font_mem;
-static uint32_t font_mem_len;
-static uint32_t font_file_pos = UINT32_MAX;
-static char font_path[TTF_FONT_PATH_MAX];
-
 extern const uint8_t builtin_ttf_start[] asm("_binary_builtin_ttf_start");
 extern const uint8_t builtin_ttf_end[] asm("_binary_builtin_ttf_end");
-static int packed_root = -1;
-static int packed_weight = -1;
-static uint32_t file_glyf_off;
-static uint32_t file_glyf_len;
-static uint8_t* file_loca;
-static uint32_t file_loca_len;
-static bool loca_long;
-static int num_glyphs;
-static uint8_t* glyf_ram;
-static uint32_t glyf_ram_off;
-static uint32_t glyf_ram_len;
-static uint8_t* gvar_ram;
-static uint32_t gvar_ram_off;
-static uint32_t gvar_ram_len;
-static uint8_t* io_data;
-static uint8_t* io_run_buf;
-static uint32_t io_base[TTF_IO_SLOTS];
-static uint16_t io_fill[TTF_IO_SLOTS];
-static uint16_t io_age[TTF_IO_SLOTS];
-static uint16_t io_clock;
-static uint32_t touch_blocks[TTF_PREFETCH_MAX];
-static int touch_n;
-
-static uint8_t* font_data;
-static uint32_t work_loca_off;
-static uint32_t work_glyf_off;
-static stbtt_fontinfo font_info;
-static bool font_ready;
-static bool sd_suspended; // 字体传输期间仅允许内置字体。/ Only built-in fonts while transferring font files.
-static ttf_size_metrics_t size_metrics[2];
-static int raw_ascent_units;
-static int current_weight = TTF_WGHT_DEF;
-static int wght_min = TTF_WGHT_MIN;
-static int wght_def = TTF_WGHT_DEF;
-static int wght_max = TTF_WGHT_MAX;
-static uint32_t file_gvar_off;
-static uint32_t file_gvar_len;
-static uint32_t gvar_data_array_off;
-static uint32_t* gvar_glyph_off;
-static int16_t shared_tuple_f2dot14[8];
-static int shared_tuple_count;
-static int gvar_axis_count;
-static bool gvar_ready;
 typedef struct {
     uint8_t slice[TTF_GVAR_SLICE_MAX];
     int16_t x[TTF_MAX_PTS];
@@ -193,14 +150,188 @@ typedef struct {
     uint16_t shared_pts[TTF_MAX_VAR_PTS];
 } ttf_work_t;
 
-static ttf_work_t* work;
-static glyph_entry_t* cache_buckets[TTF_CACHE_BUCKETS];
-static glyph_entry_t* lru_head;
-static glyph_entry_t* lru_tail;
-static size_t cache_bytes;
-static bool bench_on;
-static ttf_bench_stats_t bench;
-static int64_t bench_start_us;
+/* ---- 角色与并发 / Roles and concurrency ---- */
+// 每个角色保留文件、度量、变体和缓存；所有入口共享一把递归锁。
+// Each role retains its file, metrics, variation and cache; every entry shares one recursive lock.
+typedef struct {
+    int v_font_fd;
+    const uint8_t* v_font_mem;
+    uint32_t v_font_mem_len;
+    uint32_t v_font_file_pos;
+    char v_font_path[TTF_FONT_PATH_MAX];
+    int v_packed_root;
+    int v_packed_weight;
+    uint32_t v_file_glyf_off;
+    uint32_t v_file_glyf_len;
+    uint8_t* v_file_loca;
+    uint32_t v_file_loca_len;
+    bool v_loca_long;
+    int v_num_glyphs;
+    uint8_t* v_glyf_ram;
+    uint32_t v_glyf_ram_off;
+    uint32_t v_glyf_ram_len;
+    uint8_t* v_gvar_ram;
+    uint32_t v_gvar_ram_off;
+    uint32_t v_gvar_ram_len;
+    uint8_t* v_io_data;
+    uint8_t* v_io_run_buf;
+    uint32_t v_io_base[TTF_IO_SLOTS];
+    uint16_t v_io_fill[TTF_IO_SLOTS];
+    uint16_t v_io_age[TTF_IO_SLOTS];
+    uint16_t v_io_clock;
+    uint32_t v_touch_blocks[TTF_PREFETCH_MAX];
+    int v_touch_n;
+    uint8_t* v_font_data;
+    uint32_t v_work_loca_off;
+    uint32_t v_work_glyf_off;
+    stbtt_fontinfo v_font_info;
+    bool v_font_ready;
+    ttf_size_metrics_t v_size_metrics[2];
+    int v_raw_ascent_units;
+    int v_current_weight;
+    int v_wght_min;
+    int v_wght_def;
+    int v_wght_max;
+    uint32_t v_file_gvar_off;
+    uint32_t v_file_gvar_len;
+    uint32_t v_gvar_data_array_off;
+    uint32_t* v_gvar_glyph_off;
+    int16_t v_shared_tuple_f2dot14[8];
+    int v_shared_tuple_count;
+    int v_gvar_axis_count;
+    bool v_gvar_ready;
+    ttf_work_t* v_work;
+    glyph_entry_t* v_cache_buckets[TTF_CACHE_BUCKETS];
+    glyph_entry_t* v_lru_head;
+    glyph_entry_t* v_lru_tail;
+    size_t v_cache_bytes;
+    bool v_bench_on;
+    ttf_bench_stats_t v_bench;
+    int64_t v_bench_start_us;
+    size_t cache_limit;
+    size_t working_bytes;
+    char display_name[TTF_FONT_NAME_MAX];
+    ttf_font_identity_t identity;
+    uint32_t hits, misses, evictions, opens;
+    bool resource_failed;
+} ttf_context_t;
+#define TTF_CONTEXT_INITIALIZER { .v_font_fd = -1, .v_font_file_pos = UINT32_MAX, .v_packed_root = -1, .v_packed_weight = -1, .v_current_weight = TTF_WGHT_DEF, .v_wght_min = TTF_WGHT_MIN, .v_wght_def = TTF_WGHT_DEF, .v_wght_max = TTF_WGHT_MAX }
+static ttf_context_t s_contexts[TTF_ROLE_COUNT] = {
+    TTF_CONTEXT_INITIALIZER, TTF_CONTEXT_INITIALIZER, TTF_CONTEXT_INITIALIZER
+};
+static ttf_context_t* s_font = &s_contexts[TTF_ROLE_READER];
+static ttf_font_role_t s_role = TTF_ROLE_READER;
+static bool sd_suspended;
+static StaticSemaphore_t s_font_mutex_storage;
+static SemaphoreHandle_t s_font_mutex;
+static portMUX_TYPE s_font_mutex_init = portMUX_INITIALIZER_UNLOCKED;
+
+static size_t role_cache_limit(ttf_font_role_t role);
+static void font_lock(void) {
+    portENTER_CRITICAL(&s_font_mutex_init);
+    if (!s_font_mutex) s_font_mutex = xSemaphoreCreateRecursiveMutexStatic(&s_font_mutex_storage);
+    portEXIT_CRITICAL(&s_font_mutex_init);
+    xSemaphoreTakeRecursive(s_font_mutex, portMAX_DELAY);
+    s_font->cache_limit = role_cache_limit(s_role);
+}
+static void font_unlock(void) { xSemaphoreGiveRecursive(s_font_mutex); }
+static size_t role_cache_limit(ttf_font_role_t role) {
+    return role == TTF_ROLE_UI ? 128u * 1024u : role == TTF_ROLE_PREVIEW ? 384u * 1024u : 1024u * 1024u;
+}
+static void select_role(ttf_font_role_t role) {
+    s_role = role;
+    s_font = &s_contexts[role];
+    s_font->cache_limit = role_cache_limit(role);
+}
+#define font_fd (s_font->v_font_fd)
+#define font_mem (s_font->v_font_mem)
+#define font_mem_len (s_font->v_font_mem_len)
+#define font_file_pos (s_font->v_font_file_pos)
+#define font_path (s_font->v_font_path)
+#define packed_root (s_font->v_packed_root)
+#define packed_weight (s_font->v_packed_weight)
+#define file_glyf_off (s_font->v_file_glyf_off)
+#define file_glyf_len (s_font->v_file_glyf_len)
+#define file_loca (s_font->v_file_loca)
+#define file_loca_len (s_font->v_file_loca_len)
+#define loca_long (s_font->v_loca_long)
+#define num_glyphs (s_font->v_num_glyphs)
+#define glyf_ram (s_font->v_glyf_ram)
+#define glyf_ram_off (s_font->v_glyf_ram_off)
+#define glyf_ram_len (s_font->v_glyf_ram_len)
+#define gvar_ram (s_font->v_gvar_ram)
+#define gvar_ram_off (s_font->v_gvar_ram_off)
+#define gvar_ram_len (s_font->v_gvar_ram_len)
+#define io_data (s_font->v_io_data)
+#define io_run_buf (s_font->v_io_run_buf)
+#define io_base (s_font->v_io_base)
+#define io_fill (s_font->v_io_fill)
+#define io_age (s_font->v_io_age)
+#define io_clock (s_font->v_io_clock)
+#define touch_blocks (s_font->v_touch_blocks)
+#define touch_n (s_font->v_touch_n)
+#define font_data (s_font->v_font_data)
+#define work_loca_off (s_font->v_work_loca_off)
+#define work_glyf_off (s_font->v_work_glyf_off)
+#define font_info (s_font->v_font_info)
+#define font_ready (s_font->v_font_ready)
+#define size_metrics (s_font->v_size_metrics)
+#define raw_ascent_units (s_font->v_raw_ascent_units)
+#define current_weight (s_font->v_current_weight)
+#define wght_min (s_font->v_wght_min)
+#define wght_def (s_font->v_wght_def)
+#define wght_max (s_font->v_wght_max)
+#define file_gvar_off (s_font->v_file_gvar_off)
+#define file_gvar_len (s_font->v_file_gvar_len)
+#define gvar_data_array_off (s_font->v_gvar_data_array_off)
+#define gvar_glyph_off (s_font->v_gvar_glyph_off)
+#define shared_tuple_f2dot14 (s_font->v_shared_tuple_f2dot14)
+#define shared_tuple_count (s_font->v_shared_tuple_count)
+#define gvar_axis_count (s_font->v_gvar_axis_count)
+#define gvar_ready (s_font->v_gvar_ready)
+#define work (s_font->v_work)
+#define cache_buckets (s_font->v_cache_buckets)
+#define lru_head (s_font->v_lru_head)
+#define lru_tail (s_font->v_lru_tail)
+#define cache_bytes (s_font->v_cache_bytes)
+#define bench_on (s_font->v_bench_on)
+#define bench (s_font->v_bench)
+#define bench_start_us (s_font->v_bench_start_us)
+
+static esp_err_t impl_ttf_font_open(const char* path);
+static esp_err_t impl_ttf_font_open_builtin(void);
+static bool impl_ttf_font_is_builtin(void);
+static bool impl_ttf_font_path_is_builtin(const char* path);
+static void impl_ttf_font_unload(void);
+static int impl_ttf_font_scan(void);
+static int impl_ttf_font_count(void);
+static const ttf_font_item_t* impl_ttf_font_item(int index);
+static const char* impl_ttf_font_path(void);
+static const char* impl_ttf_font_display_name(void);
+static bool impl_ttf_font_ready(void);
+static int impl_ttf_ascender(int size);
+static int impl_ttf_ascender_px(int pixel_height);
+static void impl_ttf_draw_text(
+    uint8_t* framebuffer, int x, int y, int size, const char* text,
+    enum EpdFontFlags align, uint8_t fg, uint8_t bg
+);
+static void impl_ttf_draw_text_px(
+    uint8_t* framebuffer, int x, int y, int pixel_height, const char* text,
+    enum EpdFontFlags align, uint8_t fg, uint8_t bg
+);
+static void impl_ttf_draw_text_px_bw(
+    uint8_t* framebuffer, int x, int y, int pixel_height, const char* text,
+    enum EpdFontFlags align, uint8_t fg, uint8_t bg
+);
+static void impl_ttf_measure_line(int size, const char* text, int* above, int* below);
+static void impl_ttf_measure_line_px(int pixel_height, const char* text, int* above, int* below);
+static int impl_ttf_text_width_px(int pixel_height, const char* text);
+static void impl_ttf_set_weight(int wght);
+static int impl_ttf_get_weight(void);
+static void impl_ttf_font_cache_clear(void);
+static void impl_ttf_bench_begin(void);
+static void impl_ttf_bench_end(ttf_bench_stats_t* out);
+static esp_err_t identity_read(const char* path, ttf_font_identity_t* out);
 
 /* ---- 字节序与文件读 / Endian and file I/O ---- */
 static uint16_t be16(const uint8_t* p) {
@@ -377,11 +508,17 @@ static bool file_read_at(uint32_t offset, void* dst, size_t n) {
     if (n == 0) return true;
     if (font_mem != NULL) {
         if (io_from_map(offset, n, dst)) return true;
-        return io_read_raw(offset, dst, n);
+        bool ok = io_read_raw(offset, dst, n);
+        if (!ok) s_font->resource_failed = true;
+        return ok;
     }
     if (font_fd < 0) return false;
     if (io_from_map(offset, n, dst)) return true;
-    if (io_data == NULL && !io_ensure()) return io_read_raw(offset, dst, n);
+    if (io_data == NULL && !io_ensure()) {
+        bool ok = io_read_raw(offset, dst, n);
+        if (!ok) s_font->resource_failed = true;
+        return ok;
+    }
 
     uint8_t* out = dst;
     uint32_t pos = offset;
@@ -389,9 +526,9 @@ static bool file_read_at(uint32_t offset, void* dst, size_t n) {
     while (left > 0) {
         uint32_t base = pos & ~(uint32_t)(TTF_IO_BLOCK - 1);
         uint32_t skip = pos - base;
-        if (!io_load_block(base)) return false;
+        if (!io_load_block(base)) { s_font->resource_failed = true; return false; }
         int slot = io_find(base);
-        if (slot < 0 || skip >= io_fill[slot]) return false;
+        if (slot < 0 || skip >= io_fill[slot]) { s_font->resource_failed = true; return false; }
         size_t take = (size_t)io_fill[slot] - skip;
         if (take > left) take = left;
         memcpy(out, io_data + (size_t)slot * TTF_IO_BLOCK + skip, take);
@@ -477,6 +614,9 @@ static bool try_map_table(
     uint32_t off, uint32_t len, uint8_t** ram, uint32_t* ram_off,
     uint32_t* ram_len, const char* name
 ) {
+    // UI 直接读内嵌 ROM；候选只流式读取，避免三份轮廓表占满 PSRAM。
+    // UI reads embedded ROM; candidates stream to avoid tripling PSRAM outline tables.
+    if (s_role != TTF_ROLE_READER || font_mem != NULL) return false;
     if (*ram != NULL || len < 4096 || len > TTF_MAP_MAX) return false;
     size_t largest = heap_caps_get_largest_free_block(
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
@@ -550,7 +690,7 @@ static bool catalog_has_name(
 static ttf_font_item_t s_catalog[TTF_FONT_MAX];
 static int s_catalog_n;
 
-int ttf_font_scan(void) {
+static int impl_ttf_font_scan(void) {
     s_catalog_n = 0;
     for (size_t d = 0; d < sizeof(k_font_dirs) / sizeof(k_font_dirs[0]); d++) {
         DIR* dir = opendir(k_font_dirs[d]);
@@ -578,11 +718,11 @@ int ttf_font_scan(void) {
     return s_catalog_n;
 }
 
-int ttf_font_count(void) {
+static int impl_ttf_font_count(void) {
     return s_catalog_n;
 }
 
-const ttf_font_item_t* ttf_font_item(int index) {
+static const ttf_font_item_t* impl_ttf_font_item(int index) {
     if (index < 0 || index >= s_catalog_n) return NULL;
     return &s_catalog[index];
 }
@@ -597,31 +737,30 @@ static int try_open_path(const char* path) {
 }
 
 static int open_font_file(const char* preferred) {
-    if (preferred == NULL || ttf_font_path_is_builtin(preferred)
+    if (preferred == NULL || impl_ttf_font_path_is_builtin(preferred)
         || is_junk_name(font_basename(preferred))) {
         return -1;
     }
     return try_open_path(preferred);
 }
 
-const char* ttf_font_path(void) {
+static const char* impl_ttf_font_path(void) {
     return font_path;
 }
 
-bool ttf_font_path_is_builtin(const char* path) {
+static bool impl_ttf_font_path_is_builtin(const char* path) {
     return path == NULL || path[0] == '\0' || strcmp(path, TTF_FONT_BUILTIN) == 0;
 }
 
-bool ttf_font_is_builtin(void) {
-    return font_ready && font_mem != NULL;
+static bool impl_ttf_font_is_builtin(void) {
+    return font_ready && !s_font->resource_failed && font_mem != NULL;
 }
 
-const char* ttf_font_display_name(void) {
-    static char name[TTF_FONT_NAME_MAX];
-    if (ttf_font_is_builtin() || ttf_font_path_is_builtin(font_path)) return "内建";
+static const char* impl_ttf_font_display_name(void) {
+    if (impl_ttf_font_is_builtin() || impl_ttf_font_path_is_builtin(font_path)) return "内建";
     if (font_path[0] == '\0') return "";
-    font_stem(font_path, name, sizeof(name));
-    return name;
+    font_stem(font_path, s_font->display_name, sizeof(s_font->display_name));
+    return s_font->display_name;
 }
 
 static bool find_sfnt_table(
@@ -1328,15 +1467,17 @@ static bool load_variation(const uint8_t* header, size_t header_len) {
     uint16_t axis_off = be16(fvar + 4);
     uint16_t axis_n = be16(fvar + 8);
     uint16_t axis_sz = be16(fvar + 10);
-    if (axis_n < 1 || axis_sz < 20) return false;
+    if (axis_n != 1 || axis_sz < 20) return false;
     uint8_t axis[20];
     if (!file_read_at(fvar_off + axis_off, axis, 20)) return false;
     if (memcmp(axis, "wght", 4) != 0) {
         ESP_LOGW(TAG, "first axis is not wght");
+        return false;
     }
     wght_min = (int)lroundf((float)((int32_t)be32(axis + 4)) / 65536.0f);
     wght_def = (int)lroundf((float)((int32_t)be32(axis + 8)) / 65536.0f);
     wght_max = (int)lroundf((float)((int32_t)be32(axis + 12)) / 65536.0f);
+    if (wght_min < 1 || wght_max > 1000 || wght_min > wght_def || wght_def > wght_max) return false;
 
     uint8_t gh[20];
     if (!file_read_at(gvar_off, gh, sizeof(gh))) return false;
@@ -1347,7 +1488,7 @@ static bool load_variation(const uint8_t* header, size_t header_len) {
     uint16_t flags = be16(gh + 14);
     gvar_data_array_off = be32(gh + 16);
     const bool gvar_long = (flags & 1u) != 0;
-    if (gc != (uint16_t)num_glyphs || gvar_axis_count < 1) {
+    if (gc != (uint16_t)num_glyphs || gvar_axis_count != 1) {
         ESP_LOGW(TAG, "gvar header mismatch gc=%u flags=%u", gc, flags);
         return false;
     }
@@ -1516,6 +1657,7 @@ static uint8_t* build_working_font(const uint8_t* header, size_t header_len) {
     loca_long = be16(head + 50) != 0;
     uint8_t* maxp = data + dst_off[6];
     num_glyphs = be16(maxp + 4);
+    s_font->working_bytes = total;
     return data;
 }
 
@@ -1558,7 +1700,7 @@ static int size_to_px(int size) {
 
 static int clamp_px(int pixel_height) {
     if (pixel_height < 12) return 12;
-    if (pixel_height > 120) return 120;
+    if (pixel_height > 160) return 160;
     return pixel_height;
 }
 
@@ -1631,12 +1773,13 @@ static void cache_evict_one(void) {
     }
 
     cache_bytes -= victim->bitmap_bytes + sizeof(*victim);
+    s_font->evictions++;
     heap_caps_free(victim->bitmap);
     heap_caps_free(victim);
 }
 
 static void cache_reserve(size_t extra) {
-    while (lru_tail != NULL && cache_bytes + extra > TTF_CACHE_LIMIT) {
+    while (lru_tail != NULL && cache_bytes + extra > s_font->cache_limit) {
         cache_evict_one();
     }
 }
@@ -1655,7 +1798,7 @@ static glyph_entry_t* cache_lookup(uint32_t codepoint, int size) {
 
 static glyph_entry_t* rasterize_glyph(uint32_t codepoint, int pixel_height) {
     int gid = stbtt_FindGlyphIndex(&font_info, (int)codepoint);
-    if (!pack_glyph_tree(gid)) return NULL;
+    if (gid == 0 || !pack_glyph_tree(gid)) return NULL;
 
     float scale = stbtt_ScaleForPixelHeight(&font_info, (float)pixel_height);
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
@@ -1667,6 +1810,7 @@ static glyph_entry_t* rasterize_glyph(uint32_t codepoint, int pixel_height) {
     if (height < 0) height = 0;
 
     size_t bitmap_bytes = (size_t)width * (size_t)height;
+    if (bitmap_bytes + sizeof(glyph_entry_t) > s_font->cache_limit) return NULL;
     cache_reserve(bitmap_bytes + sizeof(glyph_entry_t));
 
     glyph_entry_t* entry = heap_caps_calloc(
@@ -1710,23 +1854,26 @@ static glyph_entry_t* rasterize_glyph(uint32_t codepoint, int pixel_height) {
 }
 
 static const glyph_entry_t* get_glyph(uint32_t codepoint, int pixel_height) {
-    if (!font_ready) return NULL;
+    if (!font_ready || s_font->resource_failed) return NULL;
     pixel_height = clamp_px(pixel_height);
     if (bench_on) bench.glyphs++;
     glyph_entry_t* entry = cache_lookup(codepoint, pixel_height);
     if (entry != NULL) {
+        s_font->hits++;
         if (bench_on) bench.hits++;
         return entry;
     }
+    s_font->misses++;
     if (bench_on) bench.misses++;
     int64_t t0 = bench_on ? esp_timer_get_time() : 0;
     entry = rasterize_glyph(codepoint, pixel_height);
+    if (!entry && stbtt_FindGlyphIndex(&font_info, (int)codepoint) != 0) s_font->resource_failed = true;
     if (bench_on) bench.raster_us += esp_timer_get_time() - t0;
     return entry;
 }
 
 static void warm_text_io(int pixel_height, const char* text) {
-    if (text == NULL || glyf_ram != NULL) return;
+    if (text == NULL || glyf_ram != NULL || font_mem != NULL) return;
     touch_n = 0;
     const char* cursor = text;
     uint32_t cps[TTF_GATHER_MAX];
@@ -1775,44 +1922,44 @@ static int measure_width(int pixel_height, const char* text) {
     return width;
 }
 
-bool ttf_font_ready(void) {
-    return font_ready;
+static bool impl_ttf_font_ready(void) {
+    return font_ready && !s_font->resource_failed;
 }
 
-void ttf_set_weight(int wght) {
+static void impl_ttf_set_weight(int wght) {
     current_weight = clamp_weight(wght);
 }
 
-int ttf_get_weight(void) {
+static int impl_ttf_get_weight(void) {
     return current_weight;
 }
 
-int ttf_ascender(int size) {
-    return ttf_ascender_px(size_to_px(size));
+static int impl_ttf_ascender(int size) {
+    return impl_ttf_ascender_px(size_to_px(size));
 }
 
-int ttf_ascender_px(int pixel_height) {
-    if (!font_ready) return 0;
+static int impl_ttf_ascender_px(int pixel_height) {
+    if (!font_ready || s_font->resource_failed) return 0;
     pixel_height = clamp_px(pixel_height);
     return (int)lroundf(
         raw_ascent_units * stbtt_ScaleForPixelHeight(&font_info, (float)pixel_height)
     );
 }
 
-void ttf_font_cache_clear(void) {
+static void impl_ttf_font_cache_clear(void) {
     cache_reset();
     packed_root = -1;
     packed_weight = -1;
     io_reset();
 }
 
-void ttf_bench_begin(void) {
+static void impl_ttf_bench_begin(void) {
     memset(&bench, 0, sizeof(bench));
     bench_on = true;
     bench_start_us = esp_timer_get_time();
 }
 
-void ttf_bench_end(ttf_bench_stats_t* out) {
+static void impl_ttf_bench_end(ttf_bench_stats_t* out) {
     bench_on = false;
     bench.total_us = esp_timer_get_time() - bench_start_us;
     if (out != NULL) *out = bench;
@@ -1827,8 +1974,11 @@ static void abandon_font_source(void) {
     font_mem_len = 0;
 }
 
-void ttf_font_unload(void) {
+static void impl_ttf_font_unload(void) {
     font_ready = false;
+    s_font->resource_failed = false;
+    memset(&s_font->identity, 0, sizeof(s_font->identity));
+    font_path[0] = '\0';
     cache_reset();
     io_unmap();
     io_reset();
@@ -1838,6 +1988,7 @@ void ttf_font_unload(void) {
     file_loca = NULL;
     heap_caps_free(font_data);
     font_data = NULL;
+    s_font->working_bytes = 0;
     reset_variation();
     packed_root = -1;
     packed_weight = -1;
@@ -1851,11 +2002,14 @@ void ttf_font_unload(void) {
     raw_ascent_units = 0;
     memset(&font_info, 0, sizeof(font_info));
     memset(size_metrics, 0, sizeof(size_metrics));
+    heap_caps_free(io_data); io_data = NULL;
+    heap_caps_free(io_run_buf); io_run_buf = NULL;
+    heap_caps_free(work); work = NULL;
 }
 
 static esp_err_t load_opened_font(void) {
     font_file_pos = UINT32_MAX;
-    io_ensure();
+    if (font_mem == NULL && !io_ensure()) return ESP_ERR_NO_MEM;
     io_reset();
     io_unmap();
 
@@ -1876,7 +2030,9 @@ static esp_err_t load_opened_font(void) {
         file_glyf_off, file_glyf_len, &glyf_ram, &glyf_ram_off, &glyf_ram_len, "glyf"
     );
 
-    load_variation(header, sizeof(header));
+    if (!load_variation(header, sizeof(header))) {
+        wght_min = wght_def = wght_max = current_weight = 400;
+    }
     if (gvar_ready && file_gvar_len > 0) {
         try_map_table(
             file_gvar_off, file_gvar_len,
@@ -1894,6 +2050,7 @@ static esp_err_t load_opened_font(void) {
         ESP_LOGE(TAG, "stbtt_InitFont failed");
         return ESP_ERR_INVALID_RESPONSE;
     }
+    if (s_font->resource_failed) return ESP_ERR_INVALID_RESPONSE;
 
     int raw_ascent = 0, raw_descent = 0, raw_gap = 0;
     stbtt_GetFontVMetrics(&font_info, &raw_ascent, &raw_descent, &raw_gap);
@@ -1905,6 +2062,7 @@ static esp_err_t load_opened_font(void) {
     }
 
     font_ready = true;
+    s_font->opens++;
     ESP_LOGI(
         TAG, "%s %s, %d glyphs, glyf %u KB%s, gvar %u KB%s, working %u KB",
         glyf_ram != NULL ? "mapped" : "stream",
@@ -1916,8 +2074,8 @@ static esp_err_t load_opened_font(void) {
     return ESP_OK;
 }
 
-esp_err_t ttf_font_open_builtin(void) {
-    ttf_font_unload();
+static esp_err_t impl_ttf_font_open_builtin(void) {
+    impl_ttf_font_unload();
     if (!ensure_work()) return ESP_ERR_NO_MEM;
 
     font_mem = builtin_ttf_start;
@@ -1928,24 +2086,19 @@ esp_err_t ttf_font_open_builtin(void) {
     return load_opened_font();
 }
 
-esp_err_t ttf_font_suspend_sd(bool suspend) {
-    sd_suspended = suspend;
-    if (suspend && (!font_ready || !ttf_font_is_builtin())) return ttf_font_open_builtin();
-    return ESP_OK;
-}
 
-esp_err_t ttf_font_open(const char* path) {
-    if (ttf_font_path_is_builtin(path)) {
-        return ttf_font_open_builtin();
+static esp_err_t impl_ttf_font_open(const char* path) {
+    if (impl_ttf_font_path_is_builtin(path)) {
+        return impl_ttf_font_open_builtin();
     }
     if (sd_suspended) return ESP_ERR_INVALID_STATE;
 
     char prev[TTF_FONT_PATH_MAX];
     strlcpy(prev, font_path, sizeof(prev));
     bool had = font_ready;
-    bool prev_file = had && !ttf_font_path_is_builtin(prev);
+    bool prev_file = had && !impl_ttf_font_path_is_builtin(prev);
 
-    ttf_font_unload();
+    impl_ttf_font_unload();
     if (!ensure_work()) return ESP_ERR_NO_MEM;
 
     font_fd = open_font_file(path);
@@ -1953,44 +2106,34 @@ esp_err_t ttf_font_open(const char* path) {
         ESP_LOGW(TAG, "TTF missing: %s", path);
         if (prev_file) {
             font_fd = try_open_path(prev);
-            if (font_fd >= 0) return load_opened_font();
+            if (font_fd >= 0 && load_opened_font() == ESP_OK) return ESP_ERR_NOT_FOUND;
         }
-        return ttf_font_open_builtin() == ESP_OK ? ESP_ERR_NOT_FOUND : ESP_FAIL;
+        return impl_ttf_font_open_builtin() == ESP_OK ? ESP_ERR_NOT_FOUND : ESP_FAIL;
     }
 
     esp_err_t err = load_opened_font();
     if (err != ESP_OK) {
         if (prev_file && strcmp(prev, path) != 0) {
-            ttf_font_unload();
+            impl_ttf_font_unload();
             font_fd = try_open_path(prev);
             if (font_fd >= 0 && load_opened_font() == ESP_OK) return err;
         }
-        return ttf_font_open_builtin() == ESP_OK ? err : ESP_FAIL;
+        return impl_ttf_font_open_builtin() == ESP_OK ? err : ESP_FAIL;
     }
     return ESP_OK;
 }
 
-esp_err_t ttf_font_init(void) {
-    if (font_ready) return ESP_OK;
-    const char* path = app_settings_font_path();
-    if (ttf_font_path_is_builtin(path)) {
-        return ttf_font_open_builtin();
-    }
-    esp_err_t err = ttf_font_open(path);
-    if (err != ESP_OK && ttf_font_ready()) return ESP_OK;
-    return err;
+
+static void impl_ttf_measure_line(int size, const char* text, int* above, int* below) {
+    impl_ttf_measure_line_px(size_to_px(size), text, above, below);
 }
 
-void ttf_measure_line(int size, const char* text, int* above, int* below) {
-    ttf_measure_line_px(size_to_px(size), text, above, below);
-}
-
-void ttf_measure_line_px(
+static void impl_ttf_measure_line_px(
     int pixel_height, const char* text, int* above, int* below
 ) {
     int max_above = 0;
     int max_below = 0;
-    if (font_ready && text != NULL) {
+    if (font_ready && !s_font->resource_failed && text != NULL) {
         pixel_height = clamp_px(pixel_height);
         warm_text_io(pixel_height, text);
         const char* cursor = text;
@@ -2007,8 +2150,8 @@ void ttf_measure_line_px(
     if (below != NULL) *below = max_below;
 }
 
-int ttf_text_width_px(int pixel_height, const char* text) {
-    if (!font_ready || text == NULL) return 0;
+static int impl_ttf_text_width_px(int pixel_height, const char* text) {
+    if (!font_ready || s_font->resource_failed || text == NULL) return 0;
     return measure_width(clamp_px(pixel_height), text);
 }
 
@@ -2033,18 +2176,18 @@ static uint8_t mix_ink(uint8_t alpha, uint8_t fg, uint8_t bg) {
     return (uint8_t)(bg + s_cover[alpha] * ((int)fg - (int)bg) / 255);
 }
 
-void ttf_draw_text(
+static void impl_ttf_draw_text(
     uint8_t* framebuffer, int x, int y, int size, const char* text,
     enum EpdFontFlags align, uint8_t fg, uint8_t bg
 ) {
-    ttf_draw_text_px(framebuffer, x, y, size_to_px(size), text, align, fg, bg);
+    impl_ttf_draw_text_px(framebuffer, x, y, size_to_px(size), text, align, fg, bg);
 }
 
-void ttf_draw_text_px(
+static void impl_ttf_draw_text_px(
     uint8_t* framebuffer, int x, int y, int pixel_height, const char* text,
     enum EpdFontFlags align, uint8_t fg, uint8_t bg
 ) {
-    if (!font_ready || framebuffer == NULL || text == NULL) return;
+    if (!font_ready || s_font->resource_failed || framebuffer == NULL || text == NULL) return;
     ttf_cover_lut_init();
     pixel_height = clamp_px(pixel_height);
     warm_text_io(pixel_height, text);
@@ -2078,11 +2221,11 @@ void ttf_draw_text_px(
     }
 }
 
-void ttf_draw_text_px_bw(
+static void impl_ttf_draw_text_px_bw(
     uint8_t* framebuffer, int x, int y, int pixel_height, const char* text,
     enum EpdFontFlags align, uint8_t fg, uint8_t bg
 ) {
-    if (!font_ready || framebuffer == NULL || text == NULL) return;
+    if (!font_ready || s_font->resource_failed || framebuffer == NULL || text == NULL) return;
     pixel_height = clamp_px(pixel_height);
     warm_text_io(pixel_height, text);
 
@@ -2114,3 +2257,419 @@ void ttf_draw_text_px_bw(
     }
 }
 
+
+/* ---- 同步公开入口 / Synchronized public entry points ---- */
+esp_err_t ttf_font_open(const char* path) {
+    font_lock();
+    ttf_font_identity_t identity;
+    esp_err_t result = s_role == TTF_ROLE_UI && !impl_ttf_font_path_is_builtin(path)
+        ? ESP_ERR_INVALID_ARG : identity_read(path, &identity);
+    if (result == ESP_OK) {
+        result = impl_ttf_font_open(identity.path);
+        if (result == ESP_OK) s_font->identity = identity;
+    }
+    font_unlock();
+    return result;
+}
+esp_err_t ttf_font_open_builtin(void) {
+    font_lock();
+    esp_err_t result = ttf_font_prepare(s_role, TTF_FONT_BUILTIN);
+    font_unlock();
+    return result;
+}
+bool ttf_font_is_builtin(void) {
+    font_lock();
+    bool result = impl_ttf_font_is_builtin();
+    font_unlock();
+    return result;
+}
+bool ttf_font_path_is_builtin(const char* path) {
+    font_lock();
+    bool result = impl_ttf_font_path_is_builtin(path);
+    font_unlock();
+    return result;
+}
+void ttf_font_unload(void) {
+    font_lock();
+    impl_ttf_font_unload();
+    font_unlock();
+}
+int ttf_font_scan(void) {
+    font_lock();
+    int result = impl_ttf_font_scan();
+    font_unlock();
+    return result;
+}
+int ttf_font_count(void) {
+    font_lock();
+    int result = impl_ttf_font_count();
+    font_unlock();
+    return result;
+}
+const ttf_font_item_t* ttf_font_item(int index) {
+    font_lock();
+    const ttf_font_item_t* result = impl_ttf_font_item(index);
+    font_unlock();
+    return result;
+}
+const char* ttf_font_path(void) {
+    font_lock();
+    const char* result = impl_ttf_font_path();
+    font_unlock();
+    return result;
+}
+const char* ttf_font_display_name(void) {
+    font_lock();
+    const char* result = impl_ttf_font_display_name();
+    font_unlock();
+    return result;
+}
+bool ttf_font_ready(void) {
+    font_lock();
+    bool result = impl_ttf_font_ready();
+    font_unlock();
+    return result;
+}
+int ttf_ascender(int size) {
+    font_lock();
+    int result = impl_ttf_ascender(size);
+    font_unlock();
+    return result;
+}
+int ttf_ascender_px(int pixel_height) {
+    font_lock();
+    int result = impl_ttf_ascender_px(pixel_height);
+    font_unlock();
+    return result;
+}
+void ttf_draw_text(uint8_t* framebuffer, int x, int y, int size, const char* text, enum EpdFontFlags align, uint8_t fg, uint8_t bg) {
+    font_lock();
+    impl_ttf_draw_text(framebuffer, x, y, size, text, align, fg, bg);
+    font_unlock();
+}
+void ttf_draw_text_px(uint8_t* framebuffer, int x, int y, int pixel_height, const char* text, enum EpdFontFlags align, uint8_t fg, uint8_t bg) {
+    font_lock();
+    impl_ttf_draw_text_px(framebuffer, x, y, pixel_height, text, align, fg, bg);
+    font_unlock();
+}
+void ttf_draw_text_px_bw(uint8_t* framebuffer, int x, int y, int pixel_height, const char* text, enum EpdFontFlags align, uint8_t fg, uint8_t bg) {
+    font_lock();
+    impl_ttf_draw_text_px_bw(framebuffer, x, y, pixel_height, text, align, fg, bg);
+    font_unlock();
+}
+void ttf_measure_line(int size, const char* text, int* above, int* below) {
+    font_lock();
+    impl_ttf_measure_line(size, text, above, below);
+    font_unlock();
+}
+void ttf_measure_line_px(int pixel_height, const char* text, int* above, int* below) {
+    font_lock();
+    impl_ttf_measure_line_px(pixel_height, text, above, below);
+    font_unlock();
+}
+int ttf_text_width_px(int pixel_height, const char* text) {
+    font_lock();
+    int result = impl_ttf_text_width_px(pixel_height, text);
+    font_unlock();
+    return result;
+}
+void ttf_set_weight(int wght) {
+    font_lock();
+    impl_ttf_set_weight(wght);
+    font_unlock();
+}
+int ttf_get_weight(void) {
+    font_lock();
+    int result = impl_ttf_get_weight();
+    font_unlock();
+    return result;
+}
+void ttf_font_cache_clear(void) {
+    font_lock();
+    impl_ttf_font_cache_clear();
+    font_unlock();
+}
+void ttf_bench_begin(void) {
+    font_lock();
+    impl_ttf_bench_begin();
+    font_unlock();
+}
+void ttf_bench_end(ttf_bench_stats_t* out) {
+    font_lock();
+    impl_ttf_bench_end(out);
+    font_unlock();
+}
+
+/* ---- 角色生命周期与资源身份 / Role lifecycle and resource identity ---- */
+static uint32_t font_crc32(const uint8_t* data, size_t n) {
+    uint32_t crc = UINT32_MAX;
+    for (size_t i = 0; i < n; i++) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; bit++) crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
+    }
+    return ~crc;
+}
+
+static esp_err_t identity_read(const char* path, ttf_font_identity_t* out) {
+    if (!out || (path && strlen(path) >= TTF_FONT_PATH_MAX)) return ESP_ERR_INVALID_ARG;
+    uint8_t header[12 + 32 * 16];
+    ttf_font_identity_t value = {0};
+    bool builtin = impl_ttf_font_path_is_builtin(path);
+    if (builtin) {
+        value.file_size = (uint64_t)(builtin_ttf_end - builtin_ttf_start);
+        if (value.file_size < sizeof(header)) return ESP_ERR_INVALID_RESPONSE;
+        memcpy(header, builtin_ttf_start, sizeof(header));
+        strlcpy(value.path, TTF_FONT_BUILTIN, sizeof(value.path));
+    } else {
+        if (sd_suspended) return ESP_ERR_INVALID_STATE;
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) return ESP_ERR_NOT_FOUND;
+        struct stat st;
+        bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size >= (off_t)sizeof(header) &&
+                  (uint64_t)st.st_size <= UINT32_MAX && read(fd, header, sizeof(header)) == sizeof(header);
+        close(fd);
+        if (!ok) return ESP_ERR_INVALID_RESPONSE;
+        value.file_size = (uint64_t)st.st_size;
+        value.mtime = (int64_t)st.st_mtime;
+        strlcpy(value.path, path, sizeof(value.path));
+    }
+    // 此引擎只支持独立 TrueType glyf 字体；边界检查拒绝截断/巨大目录。
+    // This engine supports standalone TrueType glyf fonts; reject truncated/oversized directories.
+    unsigned tables = be16(header + 4);
+    if (be32(header) != 0x00010000 || tables == 0 || tables > 32) return ESP_ERR_NOT_SUPPORTED;
+    size_t working_bytes = TTF_GLYF_ARENA;
+    for (unsigned i = 0; i < tables; i++) {
+        const uint8_t* table = header + 12 + i * 16;
+        uint32_t offset = be32(table + 8), length = be32(table + 12);
+        if ((uint64_t)offset + length > value.file_size) return ESP_ERR_INVALID_RESPONSE;
+        if (!memcmp(table, "cmap", 4) || !memcmp(table, "hmtx", 4) || !memcmp(table, "loca", 4) ||
+            !memcmp(table, "head", 4) || !memcmp(table, "hhea", 4) || !memcmp(table, "maxp", 4))
+            working_bytes += length;
+    }
+    if (working_bytes > 1024u * 1024u) return ESP_ERR_NO_MEM;
+    value.header_crc = font_crc32(header, 12 + tables * 16);
+    *out = value;
+    return ESP_OK;
+}
+
+esp_err_t ttf_font_identity_read(const char* path, ttf_font_identity_t* out) {
+    font_lock();
+    esp_err_t result = identity_read(path, out);
+    font_unlock();
+    return result;
+}
+
+bool ttf_font_identity_equal(const ttf_font_identity_t* a, const ttf_font_identity_t* b) {
+    return a && b && !strcmp(a->path, b->path) && a->file_size == b->file_size &&
+           a->mtime == b->mtime && a->header_crc == b->header_crc;
+}
+
+esp_err_t ttf_font_begin(ttf_font_role_t role, ttf_font_scope_t* scope) {
+    if (!scope || role < 0 || role >= TTF_ROLE_COUNT) return ESP_ERR_INVALID_ARG;
+    scope->locked = false;
+    font_lock();
+    if (!s_contexts[role].v_font_ready || s_contexts[role].resource_failed) {
+        font_unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    scope->previous = s_role;
+    scope->locked = true;
+    select_role(role);
+    return ESP_OK;
+}
+
+void ttf_font_end(ttf_font_scope_t* scope) {
+    if (!scope || !scope->locked) return;
+    select_role(scope->previous);
+    scope->locked = false;
+    font_unlock();
+}
+
+esp_err_t ttf_font_prepare(ttf_font_role_t role, const char* path) {
+    if (role < 0 || role >= TTF_ROLE_COUNT ||
+        (role == TTF_ROLE_UI && !ttf_font_path_is_builtin(path))) return ESP_ERR_INVALID_ARG;
+    font_lock();
+    char requested[TTF_FONT_PATH_MAX];
+    if (path && strlen(path) >= sizeof(requested)) { font_unlock(); return ESP_ERR_INVALID_ARG; }
+    strlcpy(requested, path ? path : TTF_FONT_BUILTIN, sizeof(requested));
+    path = requested;
+    ttf_font_role_t previous = s_role;
+    select_role(role);
+    ttf_font_identity_t identity;
+    esp_err_t result = identity_read(path, &identity);
+    if (result == ESP_OK && font_ready && !s_font->resource_failed &&
+        ttf_font_identity_equal(&identity, &s_font->identity)) {
+        select_role(previous);
+        font_unlock();
+        return ESP_OK;
+    }
+    impl_ttf_font_unload();
+    if (result == ESP_OK) {
+        if (role == TTF_ROLE_PREVIEW) {
+            // 只释放正文可选整表映射；保留句柄、度量与字形缓存，给候选预留空间。
+            // Release only optional reader table maps; retain its file, metrics and glyph cache for the candidate.
+            select_role(TTF_ROLE_READER);
+            io_unmap();
+            select_role(role);
+        }
+        if (impl_ttf_font_path_is_builtin(path)) result = impl_ttf_font_open_builtin();
+        else {
+            if (!ensure_work()) result = ESP_ERR_NO_MEM;
+            else {
+                font_fd = open_font_file(path);
+                result = font_fd < 0 ? ESP_ERR_NOT_FOUND : load_opened_font();
+            }
+        }
+    }
+    if (result == ESP_OK) {
+        s_font->identity = identity;
+        if (role == TTF_ROLE_UI) impl_ttf_set_weight(400);
+    }
+    else {
+        impl_ttf_font_unload();
+        s_font->resource_failed = true;
+        strlcpy(font_path, path ? path : TTF_FONT_BUILTIN, sizeof(font_path));
+    }
+    select_role(previous);
+    font_unlock();
+    return result;
+}
+
+esp_err_t ttf_font_init(void) {
+    esp_err_t result = ttf_font_prepare(TTF_ROLE_UI, TTF_FONT_BUILTIN);
+    if (result != ESP_OK) return result;
+    result = ttf_font_prepare(TTF_ROLE_READER, app_settings_font_path());
+    // 兼容启动无卡：正文子集仍明确可检测缺字；恢复草稿路径另做身份验证。
+    // Keep cardless startup usable with detectable subset coverage; restored drafts verify their own identities.
+    if (result != ESP_OK) result = ttf_font_prepare(TTF_ROLE_READER, TTF_FONT_BUILTIN);
+    return result;
+}
+
+esp_err_t ttf_font_apply_preview(void) {
+    font_lock();
+    if (!s_contexts[TTF_ROLE_PREVIEW].v_font_ready || s_contexts[TTF_ROLE_PREVIEW].resource_failed) {
+        font_unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    ttf_context_t swap = s_contexts[TTF_ROLE_READER];
+    s_contexts[TTF_ROLE_READER] = s_contexts[TTF_ROLE_PREVIEW];
+    s_contexts[TTF_ROLE_PREVIEW] = swap;
+    ttf_font_role_t previous = s_role;
+    select_role(TTF_ROLE_PREVIEW);
+    // 回滚用旧正文变成候选后，立即收紧其预算；不超过总 glyph 1.5 MiB。
+    // Trim the old reader to the candidate budget immediately; total glyph storage stays within 1.5 MiB.
+    cache_reserve(0);
+    io_unmap();
+    select_role(previous);
+    font_unlock();
+    return ESP_OK;
+}
+
+void ttf_font_discard_preview(void) {
+    font_lock();
+    ttf_font_role_t previous = s_role;
+    select_role(TTF_ROLE_PREVIEW);
+    impl_ttf_font_unload();
+    select_role(previous);
+    font_unlock();
+}
+
+void ttf_font_media_lost(void) {
+    font_lock();
+    ttf_font_role_t previous = s_role;
+    for (int i = TTF_ROLE_READER; i <= TTF_ROLE_PREVIEW; i++) {
+        select_role((ttf_font_role_t)i);
+        if (!impl_ttf_font_path_is_builtin(font_path)) {
+            ttf_font_identity_t saved = s_font->identity;
+            char saved_path[TTF_FONT_PATH_MAX];
+            strlcpy(saved_path, font_path, sizeof(saved_path));
+            impl_ttf_font_unload();
+            s_font->identity = saved;
+            strlcpy(font_path, saved_path, sizeof(font_path));
+            s_font->resource_failed = true;
+        }
+    }
+    select_role(previous);
+    font_unlock();
+}
+
+esp_err_t ttf_font_suspend_sd(bool suspend) {
+    font_lock();
+    sd_suspended = suspend;
+    if (suspend) ttf_font_media_lost();
+    font_unlock();
+    return ESP_OK;
+}
+
+bool ttf_font_has_codepoint(uint32_t codepoint) {
+    font_lock();
+    bool found = font_ready && !s_font->resource_failed && codepoint <= 0x10ffff &&
+                 stbtt_FindGlyphIndex(&font_info, (int)codepoint) != 0;
+    font_unlock();
+    return found;
+}
+
+bool ttf_font_check_text(const char* text, uint32_t* first_missing) {
+    if (first_missing) *first_missing = 0;
+    if (!text) return false;
+    font_lock();
+    bool found = font_ready && !s_font->resource_failed;
+    while (found && *text) {
+        uint32_t cp = decode_utf8(&text);
+        if (cp == '\n' || cp == '\r' || cp == '\t') continue;
+        if (stbtt_FindGlyphIndex(&font_info, (int)cp) == 0) {
+            found = false;
+            if (first_missing) *first_missing = cp;
+        }
+    }
+    font_unlock();
+    return found;
+}
+
+bool ttf_font_resource_failed(void) {
+    font_lock();
+    bool failed = s_font->resource_failed;
+    font_unlock();
+    return failed;
+}
+
+int ttf_font_pixel_height_for_em(int em) {
+    font_lock();
+    int height = 0;
+    if (font_ready && em > 0 && em <= 120) {
+        float em_scale = stbtt_ScaleForMappingEmToPixels(&font_info, (float)em);
+        float unit_height_scale = stbtt_ScaleForPixelHeight(&font_info, 1.0f);
+        if (unit_height_scale > 0) height = (int)lroundf(em_scale / unit_height_scale);
+        if (height > 160) height = 0;
+    }
+    font_unlock();
+    return height;
+}
+
+bool ttf_font_weight_range(int* minimum, int* maximum) {
+    font_lock();
+    if (minimum) *minimum = wght_min;
+    if (maximum) *maximum = wght_max;
+    bool variable = font_ready && !s_font->resource_failed && gvar_ready;
+    font_unlock();
+    return variable;
+}
+
+void ttf_font_cache_stats(ttf_font_role_t role, ttf_font_cache_stats_t* out) {
+    if (!out || role < 0 || role >= TTF_ROLE_COUNT) return;
+    font_lock();
+    const ttf_context_t* ctx = &s_contexts[role];
+    *out = (ttf_font_cache_stats_t){
+        .glyph_bytes = ctx->v_cache_bytes, .glyph_limit = role_cache_limit(role),
+        .resident_bytes = ctx->working_bytes + ctx->v_file_loca_len +
+                          (ctx->v_gvar_glyph_off ? (size_t)(ctx->v_num_glyphs + 1) * 4 : 0),
+        .stream_bytes = (ctx->v_io_data ? TTF_IO_SLOTS * TTF_IO_BLOCK : 0) +
+                        (ctx->v_io_run_buf ? TTF_IO_RUN_MAX * TTF_IO_BLOCK : 0),
+        .mapped_bytes = ctx->v_glyf_ram_len + ctx->v_gvar_ram_len,
+        .scratch_bytes = ctx->v_work ? sizeof(ttf_work_t) : 0,
+        .hits = ctx->hits, .misses = ctx->misses, .evictions = ctx->evictions, .opens = ctx->opens,
+        .ready = ctx->v_font_ready, .resource_failed = ctx->resource_failed
+    };
+    for (const glyph_entry_t* glyph = ctx->v_lru_head; glyph; glyph = glyph->lru_next) out->glyph_entries++;
+    font_unlock();
+}

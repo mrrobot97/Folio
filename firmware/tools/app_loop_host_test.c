@@ -24,6 +24,9 @@ static int home_enters, home_renders, last_menu_leaf, rendered_leaf;
 static const app_desc_t* menu_background;
 static app_desc_t first, second;
 static bool full_tick, lock_due, font_due;
+static bool power_woke = true, menu_after_request;
+static bool wake_switch;
+static int wake_callbacks;
 static int64_t time_offset, time_step;
 static int du_areas, gl_areas;
 static bool media_test, sd_font, saved_sd_font;
@@ -52,8 +55,10 @@ void rails_idle_check(int64_t n) {(void)n;}
 bool read_pico_pmu_ready(void) {return lock_due;}
 bool read_pico_pmu_take_key_short(void) {return true;}
 void enter_lock_and_sleep(EpdiyHighlevelState*h,int64_t*t,void*a) {(void)h;(void)t;(void)a;lock_due=false;time_offset+=1000000;}
-void folio_power_request(app_ctx_t* ctx,bool off,int64_t* ignore) {
+bool folio_power_request(app_ctx_t* ctx,const app_desc_t* origin,bool off,int64_t* ignore) {
+    assert(origin != NULL);
     (void)off; enter_lock_and_sleep(ctx->hl,ignore,ctx->acc);
+    return power_woke;
 }
 const char* app_settings_font_path(void) {return "builtin";}
 bool ttf_font_path_is_builtin(const char*p) {(void)p;return !font_due&&!saved_sd_font;}
@@ -62,6 +67,7 @@ bool ttf_font_is_builtin(void) {return !font_due&&!sd_font;}
 const char* ttf_font_path(void) {return "other";}
 int ttf_font_open(const char*p) {(void)p;font_opens++;sd_font=true;return 0;}
 int ttf_font_open_builtin(void) {assert(media_lost>0);builtin_opens++;sd_font=font_due=false;return 0;}
+void ttf_font_media_lost(void) { if (sd_font || font_due) (void)ttf_font_open_builtin(); }
 int read_pico_sd_get_info(read_pico_sd_info_t*i) {i->mounted=media_test?mounted_steps[step]:font_due;return media_test&&!i->mounted?ESP_ERR_INVALID_STATE:0;}
 void read_pico_sd_start_probe(void) {probes++;}
 static void lost(app_ctx_t*c) {(void)c;media_lost++;loss_step=step;}
@@ -99,11 +105,15 @@ static app_redraw_t key(app_ctx_t*c,int k) {keys[k]++;if(home_on_key)c->request_
 static app_redraw_t tick(app_ctx_t*c) {
     ticks++;tick_consumed[step]=c->consumed;
     if(request_on_tick)c->request_app=&second;
+    if(request_on_tick&&menu_after_request)c->request_menu_after_switch=true;
     if(menu_on_tick)c->request_menu=true;
     if(home_on_tick){c->request_return=true;home_on_tick=false;}
     return full_tick ? APP_REDRAW_FULL : APP_REDRAW_NONE;
 }
+static void woke_to_safe_page(app_ctx_t* c) { ++wake_callbacks; if(wake_switch)c->request_app=&second; }
+static app_redraw_t return_key(app_ctx_t* c,int k) { (void)k;c->request_return=true;return APP_REDRAW_NONE; }
 static void reset(void) {
+    power_woke=true;menu_after_request=wake_switch=false;wake_callbacks=0;
     media_test=sd_font=saved_sd_font=false;media_lost=builtin_opens=font_opens=probes=0;loss_step=-1;
     memset(mounted_steps,0,sizeof(mounted_steps));
     long_keys=0;
@@ -237,6 +247,21 @@ int main(void) {
     reset();media_test=sd_font=saved_sd_font=true;mounted_steps[0]=mounted_steps[2]=true;time_step=4000000;first.on_media_lost=lost;
     add(0,0,0,0);add(0,0,0,0);add(0,0,0,0);add(0,0,0,0);run();
     assert(media_lost==2&&builtin_opens==2&&!probes&&font_opens==2);
-    puts("app_loop: 42 scheduler scenarios passed");
+    // 页面拥有字体时旧全局首选不能抢占其正文或候选。/ Managed faces must not be overwritten by legacy retries.
+    reset();first.manages_font=true;font_due=true;time_offset=4000000;
+    add(0,0,0,0);add(0,0,0,0);run();assert(font_due&&!font_opens);
+    // 仅真正唤醒调用 on_wake；取消睡眠保留当前来源。/ Only actual wake calls on_wake; cancellation retains origin.
+    reset();first.on_wake=woke_to_safe_page;time_step=1000000;lock_due=true;
+    add(0,0,0,0);add(0,0,0,0);add(0,0,0,0);add(0,0,0,0);run();assert(wake_callbacks==1);
+    reset();first.on_wake=woke_to_safe_page;power_woke=false;time_step=1000000;lock_due=true;
+    add(0,0,0,0);add(0,0,0,0);add(0,0,0,0);add(0,0,0,0);run();assert(!wake_callbacks);
+    reset();first.on_wake=woke_to_safe_page;wake_switch=true;second.render=home_render;time_step=1000000;lock_due=true;
+    add(0,0,0,0);add(0,0,0,0);add(0,0,0,0);add(0,0,0,0);run();assert(wake_callbacks==1&&enters==2&&exits==1&&home_renders==1);
+    // 放弃后以安全来源为菜单背景；关闭或再次返回不复活已关闭编辑器。
+    // Discard opens the source menu; closing/returning cannot resurrect the closed editor.
+    reset();request_on_tick=menu_after_request=true;second.render=home_render;second.on_key=return_key;
+    add(0,0,0,0);add(400,1500,1,0);add(0,0,0,0);add(80,1500,1,0);add(0,0,0,0);run();
+    assert(enters==2&&exits==1&&menus==2&&home_renders==1&&menu_background==&second);
+    puts("app_loop: 47 scheduler scenarios passed");
     return 0;
 }

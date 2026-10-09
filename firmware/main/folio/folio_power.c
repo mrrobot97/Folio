@@ -6,6 +6,9 @@
 #include "folio_ui.h"
 #include "reader_runtime.h"
 #include "read_pico_transfer.h"
+#include "transfer_navigation.h"
+#include "format_service.h"
+#include "folio_metrics.h"
 #include "read_pico_pmu.h"
 #include "sleep.h"
 #include "display.h"
@@ -44,7 +47,11 @@ static int resolve_failure(app_ctx_t* ctx, bool transfer_busy, bool command_fail
                 EpdRect hit = choice ? (EpdRect){360,968,284,96} : (EpdRect){40,968,284,96};
                 if (!ui_rect_hit(hit,touch.x,touch.y)) choice = -1;
             }
-            if (held && !touch.touched && choice >= 0) return choice;
+            if (held && !touch.touched && choice >= 0) {
+                folio_metrics_input_end();
+                folio_metrics_input(FOLIO_METRICS_SLEEP,FOLIO_METRICS_TOUCH);
+                return choice;
+            }
             if (touch.count > 1) choice = -1;
             held = touch.touched;
         } else {
@@ -62,11 +69,15 @@ static bool retry_or_return(app_ctx_t* ctx, bool transfer_busy, bool command_fai
         // Missing original media/font keeps this screen, the recovery entry and RAM draft intact.
     }
 }
-void folio_power_request(app_ctx_t* ctx, bool poweroff, int64_t* ignore_until_ms) {
+bool folio_power_request(app_ctx_t* ctx, const app_desc_t* origin, bool poweroff, int64_t* ignore_until_ms) {
+    folio_metrics_set_scenario(FOLIO_METRICS_SLEEP);
+    folio_format_capture_power_origin(origin);
     app_sleep_mode_t mode = poweroff ? APP_SLEEP_OFF : app_settings_sleep_mode();
     bool eco = mode != APP_SLEEP_LIGHT;
+    bool woke = false;
     for (;;) {
         bool network_stopped = read_pico_transfer_try_stop_if_idle();
+        if (network_stopped) app_transfer_power_stopped();
         bool saved = false;
         int64_t start = esp_timer_get_time();
         // 最多两次完整保存；超两秒不发起下一次，不中止正在完成的文件写入。
@@ -79,8 +90,9 @@ void folio_power_request(app_ctx_t* ctx, bool poweroff, int64_t* ignore_until_ms
             if (retry_or_return(ctx,!network_stopped,false)) continue;
             break;
         }
-        if (enter_lock_and_sleep_mode(ctx->hl,ignore_until_ms,ctx->acc,mode)) break;
+        if (enter_lock_and_sleep_mode(ctx->hl,ignore_until_ms,ctx->acc,mode)) { woke = true; break; }
         if (!retry_or_return(ctx,false,true)) break;
     }
     folio_reader_wake();
+    return woke;
 }

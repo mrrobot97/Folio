@@ -14,6 +14,22 @@
 #include <stdint.h>
 #include "epdiy.h"
 #include "html_text.h"
+#include "format_model.h"
+
+typedef struct book_layout_candidate book_layout_candidate_t;
+typedef enum { BOOK_LAYOUT_ERROR_NONE,BOOK_LAYOUT_ERROR_INVALID,BOOK_LAYOUT_ERROR_MEMORY,BOOK_LAYOUT_ERROR_GLYPH,BOOK_LAYOUT_ERROR_FONT_RESOURCE } book_layout_error_t;
+/// 最近一次分页失败的原因及首个缺字；只查询，不读取文件。/ Last pagination error and first missing glyph; query only, no file reads.
+book_layout_error_t book_layout_last_error(uint32_t* missing_codepoint);
+/// 独立候选页表；调用者绑定 PREVIEW 字体，失败不动当前页表。/ Independent candidate pages; caller binds PREVIEW font, failure preserves the active layout.
+book_layout_candidate_t* book_layout_prepare_format(const char* utf8,size_t len,const blk_t* blocks,size_t count,
+    EpdRect rect,const folio_format_values_t* values,size_t anchor);
+/// ACK 后发布候选页表；之前的页表同时释放。/ Publish candidate after ACK, freeing the previous layout.
+bool book_layout_commit_format(book_layout_candidate_t* candidate);
+void book_layout_discard_format(book_layout_candidate_t* candidate);
+bool book_layout_begin_formatted(const char* utf8,size_t len,const blk_t* blocks,size_t count,EpdRect rect,const folio_format_values_t* values);
+/// 页表/行缓存实际字节数，不计借用的章节原文。/ Actual page-table/line-buffer bytes, excluding borrowed chapter text.
+size_t book_layout_memory_bytes(void);
+size_t book_layout_candidate_memory_bytes(const book_layout_candidate_t* candidate);
 
 /// 重排借用文本；空文一页，失败清空布局，超过 4096 页返回 false。/ Borrow and paginate; empty text has one page, failure clears layout, over 4096 pages fails.
 bool book_layout_build(const char* utf8, size_t len, EpdRect rect, int px);

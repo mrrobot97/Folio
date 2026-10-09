@@ -27,6 +27,8 @@
 #include "vcom_setup.h"
 #include "book_store.h"
 #include "reading_service.h"
+#include "format_service.h"
+#include "folio_metrics.h"
 
 static const char* TAG = "read_pico";
 
@@ -67,6 +69,7 @@ static bool images_match_panel(void) {
 }
 
 void app_main(void) {
+    folio_metrics_init();
     read_pico_handle_t hw;
     if (read_pico_init(&hw) != ESP_OK) return;
     app_settings_init();
@@ -103,6 +106,7 @@ void app_main(void) {
         vcom_setup_run(&hl, framebuffer, hw.touch);
     }
 
+    const app_desc_t* restored = st_resume ? NULL : folio_format_restore_boot();
     app_loop_run(&(app_loop_config_t){
         .hl = &hl,
         .fb = framebuffer,
@@ -111,6 +115,6 @@ void app_main(void) {
         .sensor_ready = hw.sensor_ready,
         // 自检跑到一半断电的话，重新上电直接回自检页接着跑。
         // Resume the self-test page if a power-cut interrupted it.
-        .first_app = st_resume ? app_selftest_page() : app_home_page(),
+        .first_app = st_resume ? app_selftest_page() : restored ? restored : app_home_page(),
     });
 }

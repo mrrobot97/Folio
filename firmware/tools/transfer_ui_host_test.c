@@ -8,6 +8,8 @@
 #include "transfer_ui_test_env.h"
 #include "../main/apps/app_transfer.c"
 #include <assert.h>
+static unsigned font_child_stop_acks;
+bool folio_format_transfer_stopped(void) { ++font_child_stop_acks; return true; }
 static void tap(app_ctx_t* ctx, EpdRect rect) {
     ui_gesture_event_t ev = {.type = UI_GESTURE_PRESS, .x0 = rect.x + 2, .y0 = rect.y + 2, .x = rect.x + 2, .y = rect.y + 2};
     on_gesture(ctx, &ev);
@@ -185,5 +187,33 @@ int main(void) {
     s_root.is_flash = true;
     app_transfer.on_media_lost(&ctx);
     assert(test_stop_count == stops_before + 1);
-    puts("transfer_ui_host_test: PASS");
+    // 字体临时子流程显式返回选择页，唤醒绝不消费旧的启动请求。
+    // Font children return explicitly to selection and never consume stale starts after wake.
+    transfer_on_exit(&ctx);
+    static const app_desc_t picker = {.title="font picker"};
+    ctx.request_app = NULL; ctx.request_return = false;
+    app_transfer_open_font_child(&ctx,&picker);
+    assert(ctx.request_app == &app_transfer && !app_transfer_is_font_child());
+    on_enter(&ctx);
+    assert(app_transfer_is_font_child() && s_start_pending);
+    tap(&ctx,control_rect(2));
+    assert(ctx.request_app == &picker && !ctx.request_return && !s_start_pending);
+    assert(font_child_stop_acks == 1);
+    transfer_on_exit(&ctx);
+    assert(!app_transfer_is_font_child());
+    app_transfer_open_font_child(&ctx,&picker);
+    on_enter(&ctx);
+    s_scan_pending = true; strcpy(s_password,"temporary-password");
+    unsigned acks = font_child_stop_acks;
+    app_transfer_power_stopped();
+    assert(!s_start_pending && !s_scan_pending && font_child_stop_acks == acks + 1);
+    app_transfer.on_wake(&ctx);
+    assert(ctx.request_app == &picker && !s_start_pending && !s_scan_pending && !s_password[0]);
+    transfer_on_exit(&ctx);
+    on_enter(&ctx);
+    assert(!app_transfer_is_font_child());
+    ctx.request_app = NULL; ctx.request_return = false;
+    tap(&ctx,control_rect(2));
+    assert(ctx.request_app == NULL && ctx.request_return);
+    puts("transfer_ui_host_test: PASS (provisioning + font-child stop/wake isolation)");
 }

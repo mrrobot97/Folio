@@ -2,7 +2,7 @@
 
 面向小纸 Pico（Read Pico / RDP-G01-W）的阅读固件开发仓库，基于官方演示固件构建，保留 ESP32-S3、16 MiB Flash、8 MiB PSRAM 和官方面板波形支持。界面参考冻结设计 v0.4.2。
 
-当前开发节点包含真实首页导航、离线阅读统计/月历/分书统计、按书字号草稿与检查点、FAST/ECO 保存门槛、自定义 TF 壁纸、手动校时、显式内置存储恢复，以及候选 OTA 策略和本地网页刷机工程。完整排版、书签及全部设计子页仍在开发；详细覆盖和限制见 [产品界面](docs/PRODUCT_UI.md)。尚未进行真机刷写、耗电或墨水屏验收。
+当前开发节点包含真实首页导航、离线阅读统计、BOOK/DEFAULTS 多字段排版草稿、独立字体预览、FAST/ECO 保存门槛、TF 壁纸、手动校时和显式存储恢复。候选 OTA 策略和网页工程已建立，产品 OTA 入口尚未闭环。书签、自动休眠和全部设计子页仍未完成，尚未进行真机刷写或耗电/墨水屏验收。准确边界及继续开发入口见 [NEXT_STEPS](docs/NEXT_STEPS.md) 和 [产品界面](docs/PRODUCT_UI.md)。
 
 ## 构建与测试
 
@@ -13,8 +13,13 @@ bash scripts/bootstrap_idf.sh
 bash scripts/build_firmware.sh
 bash scripts/test_system.sh
 sh scripts/test_reader.sh
+sh scripts/test_reader_format.sh
+sh scripts/test_reader_device.sh
+bash scripts/test_fonts.sh
 sh tests/power/run.sh
 sh tests/ui/run.sh
+sh tests/ui/run_format.sh
+sh tests/metrics/run.sh
 python3 -m unittest discover -s tests/ota -p 'test_*.py'
 npm --prefix web test
 ```
@@ -29,7 +34,7 @@ npm --prefix web run build
 npm --prefix web run preview
 ```
 
-网页目前本地运行，未启用 GitHub Pages。它不会自动连接串口，也不会自动擦除设备；只有经过包/设备核对及用户确认后才允许应用更新。没有真实发布包时不能刷写。详见 [OTA 与网页刷机](docs/OTA.md)。
+网页支持本地运行，未启用 GitHub Pages。它不会自动连接串口，也不会自动擦除设备；只有经过包/设备核对及用户确认后才允许应用更新。没有真实发布包时不能刷写。详见 [OTA 与网页刷机](docs/OTA.md)。
 
 壁纸转换器使用 Pillow，将本地图片裁切成竖屏 684×1216、16 灰阶并附完整性校验：
 

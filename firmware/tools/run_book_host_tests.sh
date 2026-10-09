@@ -10,7 +10,7 @@ flags=(-std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -g -fsanitize=address,un
 gc_sections=(-Wl,--gc-sections)
 if [[ $(uname -s) == Darwin ]]; then gc_sections=(-Wl,-dead_strip); fi
 gcc "${flags[@]}" -Itools/book_epub_stubs -Itools/zip_host_stubs tools/book_source_host_test.c main/book/book_source.c main/book/book_txt.c main/book/gbk.c main/book/book_epub.c main/book/zip_reader.c main/book/html_text.c main/book/book_image.c main/book/vendor/tjpgd.c -lz -o build/book-tests/source
-gcc "${flags[@]}" -Itools/book_layout_stubs -Itools/book_source_host_stubs tools/book_layout_host_test.c main/book/book_layout.c -o build/book-tests/layout
+gcc "${flags[@]}" -Imain/folio -Itools/book_layout_stubs -Itools/book_source_host_stubs tools/book_layout_host_test.c main/book/book_layout.c main/folio/format_model.c -o build/book-tests/layout
 gcc "${flags[@]}" -Itools/book_storage_stubs tools/book_storage_host_test.c main/book/book_progress.c -o build/book-tests/progress
 gcc "${flags[@]}" -Itools/book_storage_stubs -Icomponents/read_pico/include tools/book_store_host_test.c -o build/book-tests/store
 gcc "${flags[@]}" tools/book_policy_host_test.c -o build/book-tests/policy

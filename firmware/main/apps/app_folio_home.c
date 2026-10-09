@@ -7,10 +7,12 @@
  * Frozen: Library is distinct from resume; unknown dates never invent today; render is I/O-free.
  */
 #include "app.h"
+#include "folio_metrics.h"
 #include "folio_ui.h"
 #include "folio_navigation.h"
 #include "reading_service.h"
 #include "reader_runtime.h"
+#include "format_service.h"
 #include "book_store.h"
 #include "ui_kit.h"
 #include "ui_gesture.h"
@@ -21,7 +23,7 @@
 #include <strings.h>
 #include <sys/stat.h>
 
-extern const app_desc_t app_transfer, app_font_pick;
+extern const app_desc_t app_transfer;
 #define HOME_BOOKS 3
 static struct {
     folio_status_t status;
@@ -29,6 +31,7 @@ static struct {
     int64_t date_check_ms;
     bool resume, scan_ok;
     char title[128], path[288];
+    char action_error[128];
     unsigned percent;
     struct { char title[128], path[288]; bool epub; } books[HOME_BOOKS];
     int count;
@@ -64,6 +67,7 @@ static void scan_books(void) {
     }
 }
 static void on_enter(app_ctx_t *ctx) {
+    s_home.action_error[0] = '\0';
     folio_ui_sample_status(&s_home.status);
     s_home.summary = folio_reading_summary_at(ctx->now_ms);
     s_home.date_check_ms = ctx->now_ms;
@@ -88,6 +92,7 @@ static void cover(uint8_t *fb, EpdRect r, const char *title) {
 static void render(app_ctx_t *ctx, uint8_t *fb) {
     (void)ctx;
     folio_ui_header(fb, &s_home.status, "小纸 Pico", false);
+    if (s_home.action_error[0]) folio_ui_text_fit(fb,40,148,26,604,s_home.action_error,FOLIO_SECONDARY,0xFF);
     folio_ui_icon(fb,FOLIO_ICON_SEARCH,598,104,36);
     ui_fill_round_rect(fb,(EpdRect){32,184,620,348},24,FOLIO_SURFACE);
     cover(fb,(EpdRect){64,216,132,194},s_home.resume?s_home.title:"一本好书");
@@ -142,7 +147,10 @@ static app_redraw_t on_gesture(app_ctx_t *ctx,const ui_gesture_event_t *e){
     for(int i=0;i<4;i++)if(ui_rect_hit((EpdRect){42+156*i,562,136,124},x,y)){
         if(i==0)ctx->request_app=&app_transfer;
         if(i==1)folio_stats_open(ctx);
-        if(i==2)ctx->request_app=&app_font_pick;
+        if(i==2){
+            if(folio_format_begin_defaults(ctx))ctx->request_app=&app_folio_format;
+            else {snprintf(s_home.action_error,sizeof(s_home.action_error),"%s",folio_format_error());return APP_REDRAW_PAGE;}
+        }
         if(i==3)return APP_REDRAW_FULL;
         return APP_REDRAW_NONE;
     }
@@ -158,5 +166,6 @@ static app_redraw_t on_key(app_ctx_t *ctx,int key){
     if(key==UI_KEY_3)ctx->request_menu=true;
     return APP_REDRAW_NONE;
 }
-const app_desc_t app_folio_home={.title="主页",.detail="阅读与本地统计",.owns_keys=true,.owns_footer=true,
+static int folio_page_metric_scene(void) { return FOLIO_METRICS_HOME; }
+const app_desc_t app_folio_home={ .metrics_scenario=folio_page_metric_scene,.title="主页",.detail="阅读与本地统计",.owns_keys=true,.owns_footer=true,
     .on_enter=on_enter,.render=render,.on_gesture=on_gesture,.on_key=on_key,.on_tick=on_tick};

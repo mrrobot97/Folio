@@ -1,0 +1,12 @@
+menu "Folio diagnostics"
+
+config FOLIO_METRICS
+    bool "Emit local software timing and heap observations"
+    default n
+    help
+        Emit fixed-tag JSON records for instrumented input, render and display
+        boundaries. This adds timer, heap-query and serial-log overhead.
+        Disabled builds do not evaluate metric arguments or emit metric logs.
+        Observations are not optical screen latency or electrical power data.
+
+endmenu

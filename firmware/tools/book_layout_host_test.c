@@ -16,6 +16,10 @@ static size_t measured_codepoints;
 static size_t measure_calls;
 static int first_draw_px, last_draw_px;
 static size_t image_pixels;
+int test_alloc_fail_after=-1;
+size_t test_allocation_peak;
+static bool test_zero_width;
+static bool check_punctuation;
 void epd_draw_pixel(int x, int y, uint8_t color, uint8_t* fb) {
     (void)color; (void)fb;
     assert(x >= 0 && y >= 0);
@@ -25,17 +29,26 @@ int ttf_text_width_px(int px, const char* text) {
     int n = 0, width = 0;
     for (; *text; text++) if (((unsigned char)*text & 0xc0) != 0x80) {
         n++;
-        width += *text == 'i' ? px / 2 : *text == 'W' ? px + px / 2 : px;
+        width += test_zero_width&&*text=='z'?0:*text == 'i' ? px / 2 : *text == 'W' ? px + px / 2 : px;
     }
     measured_codepoints += (size_t)n;
     measure_calls++;
     return width;
 }
 int ttf_ascender_px(int px) { return px; }
+int ttf_font_pixel_height_for_em(int em) { return em; }
+bool ttf_font_has_codepoint(uint32_t codepoint){(void)codepoint;return true;}
+bool ttf_font_resource_failed(void){return false;}
 void ttf_draw_text_px(uint8_t* fb, int x, int y, int px, const char* text,
                       enum EpdFontFlags align, uint8_t fg, uint8_t bg) {
     (void)fb; (void)x; (void)y; (void)px; (void)align;
     assert(fg <= 15 && bg <= 15);
+    if(check_punctuation&&text[0]){
+        const char* closing[]={"，","。","！","？","）"};
+        const char* opening[]={"（","《","“"};
+        for(size_t i=0;i<sizeof(closing)/sizeof(*closing);i++)assert(strncmp(text,closing[i],strlen(closing[i])));
+        for(size_t i=0;i<sizeof(opening)/sizeof(*opening);i++){size_t n=strlen(opening[i]),len=strlen(text);assert(len<n||memcmp(text+len-n,opening[i],n));}
+    }
     if (!drawn[0]) first_draw_px = px;
     last_draw_px = px;
     assert(strlen(drawn) + strlen(text) < sizeof(drawn));
@@ -200,6 +213,47 @@ int main(void) {
     drawn[0]=0;book_layout_draw_page(&fb,0,r,48);
     assert(strstr(drawn,"标题图") && !strstr(drawn,"重复") && !strstr(drawn,"第 8 节"));
     assert(book_layout_page_count()==before_pages && book_layout_page_start_offset(0)==before_offset);
+    const char punctuation[]="甲乙，丙丁。戊己！庚辛？（壬癸）";
+    EpdRect punctuation_rect={0,0,20,100};assert(book_layout_build(punctuation,strlen(punctuation),punctuation_rect,10));
+    drawn[0]=0;check_punctuation=true;
+    for(size_t i=0;i<book_layout_page_count();i++)book_layout_draw_page(&fb,i,punctuation_rect,10);
+    check_punctuation=false;assert(!strcmp(drawn,punctuation));
+    // 候选页表是独立生产实现，分配失败或丢弃后原页面仍能绘制。
+    // Candidate pages use the production implementation; OOM/discard preserve the drawable active page.
+    r=(EpdRect){40,120,604,984};
+    folio_format_values_t format=folio_format_builtin_defaults();
+    assert(book_layout_begin_formatted(chapter,1200,NULL,0,r,&format));
+    drawn[0]=0;book_layout_draw_page(&fb,0,r,44);char original[20000];strcpy(original,drawn);
+    size_t active_pages=book_layout_page_count(),active_memory=book_layout_memory_bytes();
+    folio_format_values_t candidate_style=format;candidate_style.px=36;candidate_style.spacing=FORMAT_LOOSE;candidate_style.indent_em=0;
+    for(int failure=0;failure<3;failure++){
+        test_alloc_fail_after=failure;
+        assert(!book_layout_prepare_format(chapter,1200,NULL,0,r,&candidate_style,501));
+        test_alloc_fail_after=-1;
+        assert(book_layout_page_count()==active_pages&&book_layout_memory_bytes()==active_memory);
+        drawn[0]=0;book_layout_draw_page(&fb,0,r,44);assert(!strcmp(drawn,original));
+    }
+    book_layout_candidate_t* candidate=book_layout_prepare_format(chapter,1200,NULL,0,r,&candidate_style,501);
+    assert(candidate&&book_layout_page_count()==active_pages);
+    drawn[0]=0;book_layout_draw_page(&fb,0,r,44);assert(!strcmp(drawn,original));
+    book_layout_discard_format(candidate);assert(book_layout_page_count()==active_pages);
+    candidate=book_layout_prepare_format(chapter,1200,NULL,0,r,&candidate_style,501);
+    assert(candidate&&book_layout_commit_format(candidate));
+    size_t anchor_page=book_layout_page_for_offset(501);assert(book_layout_page_start_offset(anchor_page)<=501);
+    if(anchor_page+1<book_layout_page_count())assert(book_layout_page_start_offset(anchor_page+1)>501);
+    drawn[0]=0;book_layout_draw_page(&fb,anchor_page,r,36);assert(drawn[0]&&first_draw_px==36);
+    // 两份布局借用同一2 MiB章节，行缓存不随章节大小增长。
+    // Both layouts borrow one 2 MiB chapter; row buffers do not scale with chapter length.
+    size_t huge_len=2u*1024u*1024u;char* huge=malloc(huge_len);assert(huge);memset(huge,'x',huge_len);
+    test_allocation_peak=0;assert(book_layout_begin_formatted(huge,huge_len,NULL,0,r,&format));
+    candidate=book_layout_prepare_format(huge,huge_len,NULL,0,r,&candidate_style,501);assert(candidate);
+    assert(test_allocation_peak<4096&&book_layout_memory_bytes()<4096&&book_layout_candidate_memory_bytes(candidate)<4096);
+    printf("2 MiB borrowed chapter: active layout %zu B + candidate %zu B; largest initial allocation %zu B (host size_t).\n",book_layout_memory_bytes(),book_layout_candidate_memory_bytes(candidate),test_allocation_peak);
+    book_layout_discard_format(candidate);
+    char zero_width[6000];memset(zero_width,'z',sizeof(zero_width));test_zero_width=true;
+    assert(!book_layout_prepare_format(zero_width,sizeof(zero_width),NULL,0,r,&format,0));test_zero_width=false;
+    drawn[0]=0;book_layout_draw_page(&fb,0,r,44);assert(drawn[0]);
     book_layout_free();
+    free(huge);
     puts("book_layout_host_test: PASS");
 }

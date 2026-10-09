@@ -616,6 +616,7 @@ static esp_err_t info_handler(httpd_req_t *req) {
     cJSON_AddStringToObject(json, "wifi_ssid", status.wifi_ssid);
     cJSON_AddStringToObject(json, "root", s_root);
     cJSON_AddBoolToObject(json, "fonts_enabled", s_font_root[0] != 0);
+    cJSON_AddBoolToObject(json, "fonts_only", s_cfg.fonts_only);
     cJSON_AddStringToObject(json, "font_root", s_font_root);
     cJSON_AddNumberToObject(json, "font_limit", TRANSFER_FONT_MAX);
     char *body = cJSON_PrintUnformatted(json);
@@ -768,6 +769,7 @@ static esp_err_t file_response(httpd_req_t *req, file_result_t result, bool dele
 
 static esp_err_t books_handler(httpd_req_t *req) {
     if (!management_request(req)) return wifi_response(req, "403 Forbidden", "{\"error\":\"请从设备显示的地址打开管理页面\"}");
+    if (s_cfg.fonts_only) return wifi_response(req, "403 Forbidden", "{\"error\":\"当前仅导入字体，请在设备上返回书架后再管理图书\"}");
     char query[1024] = {0}, encoded[766], name[256] = {0}, path[448];
     if (httpd_req_get_url_query_len(req) && httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) return respond_error(req, 400);
     esp_err_t name_err = httpd_query_key_value(query, "name", encoded, sizeof(encoded));
@@ -838,6 +840,7 @@ static esp_err_t upload_handler(httpd_req_t *req) {
     if (!management_request(req)) return wifi_response(req, "403 Forbidden", "{\"error\":\"请从设备显示的地址打开管理页面\"}");
     char query[512], encoded[361], name[121], path[288], part[296], replace[8];
     bool font = req->user_ctx != NULL;
+    if (s_cfg.fonts_only && !font) return wifi_response(req, "403 Forbidden", "{\"error\":\"当前仅导入字体，请在设备上返回书架后再上传图书\"}");
     if (font && !s_font_root[0]) return wifi_response(req, "409 Conflict", "{\"error\":\"字体需要 TF 卡，请挂载后重新进入传书\"}");
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
         httpd_query_key_value(query, "name", encoded, sizeof(encoded)) != ESP_OK ||
@@ -918,6 +921,7 @@ void read_pico_transfer_stop(void) {
 
 esp_err_t read_pico_transfer_start(const read_pico_transfer_cfg_t *cfg) {
     if (!cfg || !cfg->root_dir || !cfg->free_bytes_cb || strlen(cfg->root_dir) >= sizeof(s_root) ||
+        (cfg->fonts_only && !cfg->font_dir) ||
         (cfg->font_dir && (cfg->is_flash || !cfg->font_dir[0] || strlen(cfg->font_dir) >= sizeof(s_font_root))) ||
         (cfg->mode != READ_PICO_TRANSFER_MODE_AP && cfg->mode != READ_PICO_TRANSFER_MODE_STA)) return ESP_ERR_INVALID_ARG;
     if (s_wifi || s_netif || s_http) return ESP_ERR_INVALID_STATE;
@@ -938,7 +942,7 @@ esp_err_t read_pico_transfer_start(const read_pico_transfer_cfg_t *cfg) {
     struct stat st;
     if (stat(cfg->root_dir, &st) || !S_ISDIR(st.st_mode)) { err = ESP_ERR_NOT_FOUND; goto fail; }
     unsigned removed = 0, restored = 0;
-    if (cleanup_interrupted(cfg->root_dir, &removed, &restored)) {
+    if (!cfg->fonts_only && cleanup_interrupted(cfg->root_dir, &removed, &restored)) {
         ESP_LOGW("transfer", "cleanup failed removed=%u restored=%u", removed, restored);
         err = ESP_FAIL; goto fail;
     }

@@ -32,6 +32,10 @@ typedef enum {
 void folio_ui_sample_status(folio_status_t *out);
 void folio_ui_text(uint8_t *fb, int x, int y, int px, const char *text,
                    enum EpdFontFlags align, uint8_t ink, uint8_t paper);
+/// 字重只在固定 UI 角色的临时锁域内改变。/ Weight is scoped to the fixed UI face only.
+void folio_ui_text_weight(uint8_t *fb, int x, int y, int px, const char *text,
+                          enum EpdFontFlags align, uint8_t ink, uint8_t paper, int weight);
+int folio_ui_text_width(int em, const char* text);
 /// UTF-8 按实际字宽截断，不切断码点。/ Ellipsize at measured UTF-8 boundaries.
 void folio_ui_text_fit(uint8_t *fb, int x, int y, int px, int width,
                        const char *text, uint8_t ink, uint8_t paper);

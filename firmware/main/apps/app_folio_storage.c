@@ -7,6 +7,7 @@
  * Frozen: Never format on render/entry; only final confirmation initializes; never touch TF/NVS.
  */
 #include "app.h"
+#include "folio_metrics.h"
 #include "folio_ui.h"
 #include "folio_navigation.h"
 #include "book_store.h"
@@ -91,5 +92,6 @@ static app_redraw_t on_key(app_ctx_t *ctx,int key){
     if(key==UI_KEY_3)ctx->request_menu=true;
     return APP_REDRAW_NONE;
 }
-const app_desc_t app_folio_storage={.title="内置存储",.detail="状态与显式初始化",.owns_keys=true,.owns_footer=true,
+static int folio_page_metric_scene(void) { return FOLIO_METRICS_SETTINGS; }
+const app_desc_t app_folio_storage={ .metrics_scenario=folio_page_metric_scene,.title="内置存储",.detail="状态与显式初始化",.owns_keys=true,.owns_footer=true,
     .on_enter=on_enter,.render=render,.on_gesture=on_gesture,.on_key=on_key};

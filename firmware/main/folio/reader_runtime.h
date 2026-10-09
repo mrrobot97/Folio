@@ -9,6 +9,7 @@
 #pragma once
 #include "app.h"
 #include <stddef.h>
+#include "format_model.h"
 
 /// 两个入口明确区分书架与续读，不隐式恢复无效挂载。/ Separate shelf/resume intent, never resume invalid mounts.
 void app_book_show_library(app_ctx_t* ctx);
@@ -49,3 +50,14 @@ bool folio_reader_retry_storage(void);
 void folio_reader_wake(void);
 /// 菜单打开暂停、关闭后允许页内 tick 重新判断；不可从 render 调用。/ Pause for menu, then allow page ticks to resume; never from render.
 void folio_reader_set_visible(bool visible);
+/// 排版服务设备适配：capture保留当前书，prepare只建立候选页表/字体。
+/// Format-service device adapter: capture retains the current book, prepare builds candidate layout/font only.
+bool folio_reader_format_capture(folio_format_snapshot_t* out);
+bool folio_reader_format_prepare(app_ctx_t* ctx,const folio_format_values_t* values,folio_format_scope_t scope);
+bool folio_reader_format_commit(const folio_format_values_t* values,uint64_t revision,folio_format_scope_t scope);
+void folio_reader_format_abort(void);
+void folio_reader_format_return(app_ctx_t* ctx,folio_format_scope_t scope);
+void folio_reader_format_retain(bool retain);
+void folio_reader_format_media_lost(void);
+bool folio_reader_format_resume_resources(void);
+const char* folio_reader_format_prepare_error(void);

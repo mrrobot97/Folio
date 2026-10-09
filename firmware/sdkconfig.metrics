@@ -1,0 +1,2 @@
+# 仅在独立观测构建中叠加；不改硬件时序。/ Overlay for a separate observation build; no timing changes.
+CONFIG_FOLIO_METRICS=y

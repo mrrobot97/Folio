@@ -3,6 +3,7 @@
  * Manual clock page: edits remain a draft until explicitly applied.
  */
 #include "app.h"
+#include "folio_metrics.h"
 #include "folio_clock.h"
 #include "folio_ui.h"
 #include "ui_kit.h"
@@ -68,5 +69,6 @@ static app_redraw_t key(app_ctx_t* ctx, int key) {
     if (key == UI_KEY_3) ctx->request_menu = true;
     return APP_REDRAW_NONE;
 }
-const app_desc_t app_folio_datetime = {.title="日期与时间", .detail="手动校时与离线统计", .owns_keys=true,.owns_footer=true,
+static int folio_page_metric_scene(void) { return FOLIO_METRICS_SETTINGS; }
+const app_desc_t app_folio_datetime = { .metrics_scenario=folio_page_metric_scene,.title="日期与时间", .detail="手动校时与离线统计", .owns_keys=true,.owns_footer=true,
     .on_enter=enter, .render=render, .on_gesture=gesture, .on_key=key};

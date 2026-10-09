@@ -4,6 +4,7 @@
 # 在仓库根运行管理功能回归；网页脚本另用 Node 验证。
 # Run management regressions from the repository root; validate web interactions separately with Node.
 set -euo pipefail
+cd "$(dirname "$0")/.."
 bash tools/run_book_host_tests.sh
 python3 tools/test_book_images.py
 python3 tools/test_font_metrics.py
@@ -22,7 +23,7 @@ gcc "${flags[@]}" "${vendor_flags[@]}" -Imanaged_components/espressif__cjson/cJS
 gcc "${flags[@]}" -Imanaged_components/espressif__cjson/cJSON tools/transfer_wifi_host_test.c \
     build/book-tests/cjson.o -lm -o build/book-tests/transfer-wifi
 build/book-tests/transfer-wifi
-gcc "${flags[@]}" -Itools/transfer_ui_stubs -Icomponents/read_pico_transfer/include tools/transfer_ui_host_test.c -o build/book-tests/transfer-ui
+gcc "${flags[@]}" -Itools/transfer_ui_stubs -Imain/folio -Icomponents/read_pico_transfer/include tools/transfer_ui_host_test.c -o build/book-tests/transfer-ui
 build/book-tests/transfer-ui
 bash tools/run_app_loop_host_tests.sh
 bash tools/run_display_host_test.sh

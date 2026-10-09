@@ -5,14 +5,14 @@
  * 传书页负责两种接入模式生命周期、书源注入与状态展示；HTTP和文件接收属于独立组件。
  * Transfer page owns both network modes, storage injection and status; the component receives files.
  *
- * 冻结：按用户双模式要求提供热点与已有WiFi，离页停止网络；沿用全局锁屏/睡眠策略，不新增协同；深睡/断电会中断传输。
+ * 冻结：按用户双模式要求提供热点与已有WiFi，离页停止网络；Folio 字体草稿子流程由统一保存门槛保护，唤醒返回安全选择页，不自动续传。
  * render只画快照；内置存储单文件上限由book_store提供，不格式化TF卡。
  * 上传并发扫描曾欠载，页内增加预填余量；离页停服后恢复，不改波形或像素时钟。
  * 用户要求设备端配网：停服后扫描选网，ASCII密码只在连接保存时写入，离开输入页即清空。
  * 用户验收要求停止后恢复进入传书前的页面或菜单位置；遗忘网络必须确认。
  * 用户要求联网后提供网址二维码；热点用单码切换连接/网页，网络变更清除旧码。
  * 卡失效时停止并汇合接收任务，清除旧容量与二维码；当前请求不得切换存储源。
- * Frozen: user-requested AP/STA modes stop networking on exit; retain global lock/sleep policy without coordination; deep sleep or power loss interrupts transfer.
+ * Frozen: AP/STA modes stop on exit; Folio font-draft children use the shared save gate and wake into safe selection without restarting transfer.
  * Render only paints snapshots; book_store defines the flash file limit. Never format the TF card.
  * Concurrent uploads underrun scan queues; increase prefill until service exit without changing waveforms or pixel clocks.
  * User-requested device provisioning scans while stopped; save ASCII passwords only on connect and clear input on leaving the editor.
@@ -26,6 +26,7 @@
 #include <string.h>
 
 #include "app.h"
+#include "folio_metrics.h"
 #include "book_store.h"
 #include "book_progress.h"
 #include "display.h"
@@ -38,6 +39,19 @@
 #include "ui_kit.h"
 #include "ui_menu.h"
 #include "ui_wifi_qr.h"
+#include "transfer_navigation.h"
+#include "format_service.h"
+
+extern const app_desc_t app_transfer;
+static const app_desc_t* s_pending_font_return;
+static const app_desc_t* s_font_child_return;
+
+void app_transfer_open_font_child(app_ctx_t* ctx, const app_desc_t* return_page) {
+    if (!ctx || !return_page || return_page == &app_transfer) return;
+    s_pending_font_return = return_page;
+    ctx->request_app = &app_transfer;
+}
+bool app_transfer_is_font_child(void) { return s_font_child_return != NULL; }
 
 static const char* TAG = "transfer_page";
 static book_store_root_t s_root;
@@ -423,7 +437,8 @@ static void render(app_ctx_t* ctx, uint8_t* fb) {
     if (s_view == TRANSFER_PASSWORD) { draw_password(fb); return; }
     (void)ctx;
     ui_clear_page(fb);
-    ui_draw_header(fb, "传书 Transfer", "浏览器上传图书或 TTF 字体");
+    ui_draw_header(fb, s_font_child_return ? "导入字体" : "传书 Transfer",
+        s_font_child_return ? "上传后返回选择，字体不会自动应用" : "浏览器上传图书或 TTF 字体");
     for (int i = 0; i < 2; ++i) {
         EpdRect r = control_rect(i);
         if (s_pressed == i) ui_draw_pressed_round_rect(fb, r, UI_BTN_RADIUS);
@@ -467,6 +482,8 @@ static void render(app_ctx_t* ctx, uint8_t* fb) {
 
 static void on_enter(app_ctx_t* ctx) {
     (void)ctx;
+    s_font_child_return = s_pending_font_return;
+    s_pending_font_return = NULL;
     // 先关闭卡上字库，再开放替换；主循环的字体重试也会被暂停。
     // Close the card font before allowing replacement; event-loop font retries are suspended too.
     s_font_error = ttf_font_suspend_sd(true);
@@ -500,6 +517,12 @@ static void stop_session(void) {
     read_pico_transfer_get_status(&s_status);
     if (s_session_started && s_status.changed_count) s_any_changed = true;
     s_session_started = false;
+    if (s_font_child_return) (void)folio_format_transfer_stopped();
+}
+
+void app_transfer_power_stopped(void) {
+    s_start_pending = s_scan_pending = false;
+    stop_session();
 }
 
 // 必须先等待 HTTP 退出，再清除旧根；不会让在途请求写到另一存储。
@@ -523,12 +546,22 @@ static void transfer_on_exit(app_ctx_t* ctx) {
     s_scan_pending = false;
     stop_session();
     ttf_font_suspend_sd(false);
+    s_font_child_return = NULL;
     display_set_bulk_io(false);
     guard_draw_result(ctx->hl, update_display_white(ctx->hl));
     if (s_any_changed) book_store_notify_changed();
     ESP_LOGI(TAG, "heap before=%u after=%u internal_before=%u internal_after=%u",
              (unsigned)s_heap_before, (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
              (unsigned)s_internal_before, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+}
+
+static void transfer_on_wake(app_ctx_t* ctx) {
+    // 主电源流程已停服；取消尚未执行的启动/扫描，不能在唤醒下一轮再启动。
+    // Power flow stopped service; cancel queued starts/scans so the next tick cannot restart them.
+    s_start_pending = s_scan_pending = false;
+    clear_password();
+    stop_session();
+    if (s_font_child_return) ctx->request_app = s_font_child_return;
 }
 
 static app_redraw_t on_tick(app_ctx_t* ctx) {
@@ -541,6 +574,7 @@ static app_redraw_t on_tick(app_ctx_t* ctx) {
             s_media_lost = false;
             s_free = book_store_free_bytes(&s_root);
             read_pico_transfer_cfg_t cfg = {.mode = s_mode, .root_dir = s_root.path, .is_flash = s_root.is_flash,
+                .fonts_only = s_font_child_return != NULL,
                 .font_dir = s_root.is_flash ? NULL : "/sdcard/fonts",
                 .file_limit = book_store_file_limit(&s_root), .free_bytes_cb = free_bytes, .free_bytes_ctx = &s_root, .file_changed_cb = book_progress_forget};
             err = read_pico_transfer_start(&cfg);
@@ -602,7 +636,8 @@ static app_redraw_t on_gesture(app_ctx_t* ctx, const ui_gesture_event_t* ev) {
             // Stop even without navigation history and cancel a queued start.
             s_start_pending = false;
             stop_session();
-            ctx->request_return = true;
+            if (s_font_child_return) ctx->request_app = s_font_child_return;
+            else ctx->request_return = true;
         } else if (origin == 1) {
             if (enter_networks()) return APP_REDRAW_PAGE;
         } else {
@@ -643,9 +678,11 @@ static bool present(app_ctx_t* ctx, app_redraw_t redraw) {
     return true;
 }
 
-const app_desc_t app_transfer = {
+static int folio_page_metric_scene(void) { return FOLIO_METRICS_TRANSFER; }
+const app_desc_t app_transfer = { .metrics_scenario=folio_page_metric_scene,
     .on_media_lost = transfer_on_media_lost,
     .title = "传书 Transfer", .detail = "热点或已有 WiFi，浏览器上传", .enter_full = true,
     .on_enter = on_enter, .on_exit = transfer_on_exit, .render = render, .present = present,
     .on_tick = on_tick, .on_gesture = on_gesture,
+    .on_wake = transfer_on_wake,
 };

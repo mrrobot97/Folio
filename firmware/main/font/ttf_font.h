@@ -11,6 +11,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "epdiy.h"
@@ -39,6 +40,62 @@ typedef struct {
 
 #define TTF_FONT_BUILTIN "builtin"
 
+/// UI 固定内置字体；正文和未应用候选彼此隔离。/ Fixed built-in UI; isolated active and candidate book faces.
+typedef enum { TTF_ROLE_UI, TTF_ROLE_READER, TTF_ROLE_PREVIEW, TTF_ROLE_COUNT } ttf_font_role_t;
+typedef struct {
+    ttf_font_role_t previous;
+    bool locked;
+} ttf_font_scope_t;
+typedef struct {
+    char path[TTF_FONT_PATH_MAX];
+    uint64_t file_size;
+    int64_t mtime;
+    uint32_t header_crc;
+} ttf_font_identity_t;
+typedef struct {
+    size_t glyph_bytes;
+    size_t glyph_limit;
+    size_t resident_bytes;
+    size_t stream_bytes;
+    size_t mapped_bytes;
+    size_t scratch_bytes;
+    uint32_t glyph_entries;
+    uint32_t hits;
+    uint32_t misses;
+    uint32_t evictions;
+    uint32_t opens;
+    bool ready;
+    bool resource_failed;
+} ttf_font_cache_stats_t;
+
+/// 持有递归字体锁直到 end；只选已加载角色，不做文件 I/O。必须同任务严格嵌套。
+/// Hold the recursive font lock until end; no file I/O. Pair in LIFO order on the same task.
+esp_err_t ttf_font_begin(ttf_font_role_t role, ttf_font_scope_t* scope);
+void ttf_font_end(ttf_font_scope_t* scope);
+/// 事件阶段准备字体；失败仅影响目标角色。UI 仅接受 builtin。渲染阶段禁止调用。
+/// Prepare during events; failure affects only the target. UI accepts only builtin. Never call from render.
+esp_err_t ttf_font_prepare(ttf_font_role_t role, const char* path);
+/// 交换候选与正文，旧正文留在候选供失败回滚；成功后 discard。不写设置或重新开文件。
+/// Swap candidate/reader, retaining the old reader for rollback; discard after success. No settings/file opens.
+esp_err_t ttf_font_apply_preview(void);
+void ttf_font_discard_preview(void);
+/// 拔卡后关闭所有外部字体，保留 UI；不会悄悄替正文选择其他字体。
+/// Close external faces after media loss, retaining UI; never silently substitute a body font.
+void ttf_font_media_lost(void);
+/// 验证身份必须在事件/恢复阶段；CRC 是 SFNT 目录身份，不是安全签名或完整内容校验。
+/// Validate during events/recovery; CRC identifies the SFNT directory, not a signature/full-content hash.
+esp_err_t ttf_font_identity_read(const char* path, ttf_font_identity_t* out);
+bool ttf_font_identity_equal(const ttf_font_identity_t* a, const ttf_font_identity_t* b);
+bool ttf_font_has_codepoint(uint32_t codepoint);
+/// 缺字返回 false 并给出首个 Unicode；不把 .notdef 当作支持。/ Report first missing Unicode instead of claiming .notdef support.
+bool ttf_font_check_text(const char* text, uint32_t* first_missing);
+bool ttf_font_resource_failed(void);
+void ttf_font_cache_stats(ttf_font_role_t role, ttf_font_cache_stats_t* out);
+/// 当前字体 em 到原引擎像素高，UI/正文预览共用；返回 0 表示无效。/ Convert current-face em to engine pixel height; zero if unavailable.
+int ttf_font_pixel_height_for_em(int em);
+/// 返回真实支持的字重范围；非可变字体返回 false 且固定为 400。/ Actual supported weight range; static faces return false and 400.
+bool ttf_font_weight_range(int* minimum, int* maximum);
+
 /// 灰阶字覆盖率伽马。小于 1 抬中间覆盖率，抗锯齿边缘更深；满墨仍是 0。
 /// Coverage gamma for gray glyphs. Below 1 lifts mid coverage so AA edges are darker; full ink stays 0.
 #ifndef TTF_COVER_GAMMA
@@ -48,7 +105,8 @@ typedef struct {
 esp_err_t ttf_font_init(void);
 esp_err_t ttf_font_open(const char* path);
 esp_err_t ttf_font_open_builtin(void);
-/// 控制任务独占传字体时切内置并暂停 SD 打开；停服后解除，保留字体设置。/ Switch to built-in and suspend SD opens on the owner task for font transfer; resume after stop without changing settings.
+/// 传字体时关闭外部字体并暂停 SD 打开；UI 保留内置，解除后由上层显式恢复。
+/// Close external faces and suspend SD opens for transfer; retain built-in UI and restore explicitly after resume.
 esp_err_t ttf_font_suspend_sd(bool suspend);
 bool ttf_font_is_builtin(void);
 bool ttf_font_path_is_builtin(const char* path);
